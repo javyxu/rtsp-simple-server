@@ -163,7 +163,7 @@ func (p *program) createDynamicResources(initial bool) error {
 
 	if p.conf.Pprof {
 		if p.pprof == nil {
-			p.pprof, err = pprof.New(p)
+			p.pprof, err = pprof.New(p.confPath, p.conf, p)
 			if err != nil {
 				return err
 			}

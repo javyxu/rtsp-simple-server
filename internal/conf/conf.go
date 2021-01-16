@@ -144,6 +144,14 @@ func (conf *Conf) fillAndCheck() error {
 	return nil
 }
 
+//NameIsExist is Exist
+func (conf *Conf) NameIsExist(name string) bool {
+	if _, ok := conf.Paths[name]; ok {
+		return true
+	}
+	return false
+}
+
 // Load loads a Conf.
 func Load(fpath string) (*Conf, bool, error) {
 	conf := &Conf{}
