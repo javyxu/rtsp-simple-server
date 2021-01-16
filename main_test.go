@@ -102,21 +102,33 @@ func (c *container) ip() string {
 	return string(out[:len(out)-1])
 }
 
-func testProgram(conf string) (*program, error) {
+func writeTempFile(byts []byte) (string, error) {
+	tmpf, err := ioutil.TempFile(os.TempDir(), "rtsp-")
+	if err != nil {
+		return "", err
+	}
+	defer tmpf.Close()
+
+	_, err = tmpf.Write(byts)
+	if err != nil {
+		return "", err
+	}
+
+	return tmpf.Name(), nil
+}
+
+func testProgram(conf string) (*program, bool) {
 	if conf == "" {
 		return newProgram([]string{})
 	}
 
-	tmpf, err := ioutil.TempFile(os.TempDir(), "rtsp-")
+	tmpf, err := writeTempFile([]byte(conf))
 	if err != nil {
-		return nil, err
+		return nil, false
 	}
-	defer os.Remove(tmpf.Name())
+	defer os.Remove(tmpf)
 
-	tmpf.WriteString(conf)
-	tmpf.Close()
-
-	return newProgram([]string{tmpf.Name()})
+	return newProgram([]string{tmpf})
 }
 
 func TestEnvironment(t *testing.T) {
@@ -158,8 +170,8 @@ func TestEnvironment(t *testing.T) {
 	os.Setenv("RTSP_PATHS_CAM1_SOURCEONDEMAND", "yes")
 	defer os.Unsetenv("RTSP_PATHS_CAM1_SOURCEONDEMAND")
 
-	p, err := testProgram("")
-	require.NoError(t, err)
+	p, ok := testProgram("")
+	require.Equal(t, true, ok)
 	defer p.close()
 
 	require.Equal(t, "test=cmd", p.conf.RunOnConnect)
@@ -217,8 +229,8 @@ func TestEnvironmentNoFile(t *testing.T) {
 	os.Setenv("RTSP_PATHS_CAM1_SOURCE", "rtsp://testing")
 	defer os.Unsetenv("RTSP_PATHS_CAM1_SOURCE")
 
-	p, err := testProgram("{}")
-	require.NoError(t, err)
+	p, ok := testProgram("{}")
+	require.Equal(t, true, ok)
 	defer p.close()
 
 	pa, ok := p.conf.Paths["cam1"]
@@ -233,121 +245,184 @@ func TestEnvironmentNoFile(t *testing.T) {
 	}, pa)
 }
 
-func TestPublish(t *testing.T) {
-	for _, conf := range []struct {
-		publishSoft  string
-		publishProto string
+var serverCert = []byte(`-----BEGIN CERTIFICATE-----
+MIIDazCCAlOgAwIBAgIUXw1hEC3LFpTsllv7D3ARJyEq7sIwDQYJKoZIhvcNAQEL
+BQAwRTELMAkGA1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoM
+GEludGVybmV0IFdpZGdpdHMgUHR5IEx0ZDAeFw0yMDEyMTMxNzQ0NThaFw0zMDEy
+MTExNzQ0NThaMEUxCzAJBgNVBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEw
+HwYDVQQKDBhJbnRlcm5ldCBXaWRnaXRzIFB0eSBMdGQwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDG8DyyS51810GsGwgWr5rjJK7OE1kTTLSNEEKax8Bj
+zOyiaz8rA2JGl2VUEpi2UjDr9Cm7nd+YIEVs91IIBOb7LGqObBh1kGF3u5aZxLkv
+NJE+HrLVvUhaDobK2NU+Wibqc/EI3DfUkt1rSINvv9flwTFu1qHeuLWhoySzDKEp
+OzYxpFhwjVSokZIjT4Red3OtFz7gl2E6OAWe2qoh5CwLYVdMWtKR0Xuw3BkDPk9I
+qkQKx3fqv97LPEzhyZYjDT5WvGrgZ1WDAN3booxXF3oA1H3GHQc4m/vcLatOtb8e
+nI59gMQLEbnp08cl873bAuNuM95EZieXTHNbwUnq5iybAgMBAAGjUzBRMB0GA1Ud
+DgQWBBQBKhJh8eWu0a4au9X/2fKhkFX2vjAfBgNVHSMEGDAWgBQBKhJh8eWu0a4a
+u9X/2fKhkFX2vjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBj
+3aCW0YPKukYgVK9cwN0IbVy/D0C1UPT4nupJcy/E0iC7MXPZ9D/SZxYQoAkdptdO
+xfI+RXkpQZLdODNx9uvV+cHyZHZyjtE5ENu/i5Rer2cWI/mSLZm5lUQyx+0KZ2Yu
+tEI1bsebDK30msa8QSTn0WidW9XhFnl3gRi4wRdimcQapOWYVs7ih+nAlSvng7NI
+XpAyRs8PIEbpDDBMWnldrX4TP6EWYUi49gCp8OUDRREKX3l6Ls1vZ02F34yHIt/7
+7IV/XSKG096bhW+icKBWV0IpcEsgTzPK1J1hMxgjhzIMxGboAeUU+kidthOob6Sd
+XQxaORfgM//NzX9LhUPk
+-----END CERTIFICATE-----
+`)
+
+var serverKey = []byte(`-----BEGIN RSA PRIVATE KEY-----
+MIIEogIBAAKCAQEAxvA8skudfNdBrBsIFq+a4ySuzhNZE0y0jRBCmsfAY8zsoms/
+KwNiRpdlVBKYtlIw6/Qpu53fmCBFbPdSCATm+yxqjmwYdZBhd7uWmcS5LzSRPh6y
+1b1IWg6GytjVPlom6nPxCNw31JLda0iDb7/X5cExbtah3ri1oaMkswyhKTs2MaRY
+cI1UqJGSI0+EXndzrRc+4JdhOjgFntqqIeQsC2FXTFrSkdF7sNwZAz5PSKpECsd3
+6r/eyzxM4cmWIw0+Vrxq4GdVgwDd26KMVxd6ANR9xh0HOJv73C2rTrW/HpyOfYDE
+CxG56dPHJfO92wLjbjPeRGYnl0xzW8FJ6uYsmwIDAQABAoIBACi0BKcyQ3HElSJC
+kaAao+Uvnzh4yvPg8Nwf5JDIp/uDdTMyIEWLtrLczRWrjGVZYbsVROinP5VfnPTT
+kYwkfKINj2u+gC6lsNuPnRuvHXikF8eO/mYvCTur1zZvsQnF5kp4GGwIqr+qoPUP
+bB0UMndG1PdpoMryHe+JcrvTrLHDmCeH10TqOwMsQMLHYLkowvxwJWsmTY7/Qr5S
+Wm3PPpOcW2i0uyPVuyuv4yD1368fqnqJ8QFsQp1K6QtYsNnJ71Hut1/IoxK/e6hj
+5Z+byKtHVtmcLnABuoOT7BhleJNFBksX9sh83jid4tMBgci+zXNeGmgqo2EmaWAb
+agQslkECgYEA8B1rzjOHVQx/vwSzDa4XOrpoHQRfyElrGNz9JVBvnoC7AorezBXQ
+M9WTHQIFTGMjzD8pb+YJGi3gj93VN51r0SmJRxBaBRh1ZZI9kFiFzngYev8POgD3
+ygmlS3kTHCNxCK/CJkB+/jMBgtPj5ygDpCWVcTSuWlQFphePkW7jaaECgYEA1Blz
+ulqgAyJHZaqgcbcCsI2q6m527hVr9pjzNjIVmkwu38yS9RTCgdlbEVVDnS0hoifl
++jVMEGXjF3xjyMvL50BKbQUH+KAa+V4n1WGlnZOxX9TMny8MBjEuSX2+362vQ3BX
+4vOlX00gvoc+sY+lrzvfx/OdPCHQGVYzoKCxhLsCgYA07HcviuIAV/HsO2/vyvhp
+xF5gTu+BqNUHNOZDDDid+ge+Jre2yfQLCL8VPLXIQW3Jff53IH/PGl+NtjphuLvj
+7UDJvgvpZZuymIojP6+2c3gJ3CASC9aR3JBnUzdoE1O9s2eaoMqc4scpe+SWtZYf
+3vzSZ+cqF6zrD/Rf/M35IQKBgHTU4E6ShPm09CcoaeC5sp2WK8OevZw/6IyZi78a
+r5Oiy18zzO97U/k6xVMy6F+38ILl/2Rn31JZDVJujniY6eSkIVsUHmPxrWoXV1HO
+y++U32uuSFiXDcSLarfIsE992MEJLSAynbF1Rsgsr3gXbGiuToJRyxbIeVy7gwzD
+94TpAoGAY4/PejWQj9psZfAhyk5dRGra++gYRQ/gK1IIc1g+Dd2/BxbT/RHr05GK
+6vwrfjsoRyMWteC1SsNs/CurjfQ/jqCfHNP5XPvxgd5Ec8sRJIiV7V5RTuWJsPu1
++3K6cnKEyg+0ekYmLertRFIY6SwWmY1fyKgTvxudMcsBY7dC4xs=
+-----END RSA PRIVATE KEY-----
+`)
+
+func TestPublishRead(t *testing.T) {
+	for _, ca := range []struct {
+		encrypted      bool
+		publisherSoft  string
+		publisherProto string
+		readerSoft     string
+		readerProto    string
 	}{
-		{"ffmpeg", "udp"},
-		{"ffmpeg", "tcp"},
-		{"gstreamer", "udp"},
-		{"gstreamer", "tcp"},
+		{false, "ffmpeg", "udp", "ffmpeg", "udp"},
+		{false, "ffmpeg", "udp", "ffmpeg", "tcp"},
+		{false, "ffmpeg", "udp", "gstreamer", "udp"},
+		{false, "ffmpeg", "udp", "gstreamer", "tcp"},
+		{false, "ffmpeg", "udp", "vlc", "udp"},
+		{false, "ffmpeg", "udp", "vlc", "tcp"},
+
+		{false, "ffmpeg", "tcp", "ffmpeg", "udp"},
+		{false, "gstreamer", "udp", "ffmpeg", "udp"},
+		{false, "gstreamer", "tcp", "ffmpeg", "udp"},
+
+		{true, "ffmpeg", "tcp", "ffmpeg", "tcp"},
+		{true, "ffmpeg", "tcp", "gstreamer", "tcp"},
+		{true, "gstreamer", "tcp", "ffmpeg", "tcp"},
 	} {
-		t.Run(conf.publishSoft+"_"+conf.publishProto, func(t *testing.T) {
-			p, err := testProgram("")
-			require.NoError(t, err)
-			defer p.close()
+		encryptedStr := func() string {
+			if ca.encrypted {
+				return "encrypted"
+			}
+			return "plain"
+		}()
+
+		t.Run(encryptedStr+"_"+ca.publisherSoft+"_"+ca.publisherProto+"_"+
+			ca.readerSoft+"_"+ca.readerProto, func(t *testing.T) {
+			var proto string
+			var port string
+			if !ca.encrypted {
+				proto = "rtsp"
+				port = "8554"
+
+				p, ok := testProgram("readTimeout: 20s")
+				require.Equal(t, true, ok)
+				defer p.close()
+
+			} else {
+				proto = "rtsps"
+				port = "8555"
+
+				serverCertFpath, err := writeTempFile(serverCert)
+				require.NoError(t, err)
+				defer os.Remove(serverCertFpath)
+
+				serverKeyFpath, err := writeTempFile(serverKey)
+				require.NoError(t, err)
+				defer os.Remove(serverKeyFpath)
+
+				p, ok := testProgram("readTimeout: 20s\n" +
+					"protocols: [tcp]\n" +
+					"encryption: yes\n" +
+					"serverCert: " + serverCertFpath + "\n" +
+					"serverKey: " + serverKeyFpath + "\n")
+				require.Equal(t, true, ok)
+				defer p.close()
+			}
 
 			time.Sleep(1 * time.Second)
 
-			switch conf.publishSoft {
+			switch ca.publisherSoft {
 			case "ffmpeg":
 				cnt1, err := newContainer("ffmpeg", "source", []string{
 					"-re",
 					"-stream_loop", "-1",
-					"-i", "/emptyvideo.ts",
+					"-i", "emptyvideo.ts",
 					"-c", "copy",
 					"-f", "rtsp",
-					"-rtsp_transport", conf.publishProto,
-					"rtsp://" + ownDockerIP + ":8554/teststream",
+					"-rtsp_transport", ca.publisherProto,
+					proto + "://" + ownDockerIP + ":" + port + "/teststream",
 				})
 				require.NoError(t, err)
 				defer cnt1.close()
 
 				time.Sleep(1 * time.Second)
 
-			default:
+			case "gstreamer":
 				cnt1, err := newContainer("gstreamer", "source", []string{
-					"filesrc location=emptyvideo.ts ! tsdemux ! queue ! video/x-h264 ! h264parse config-interval=1 ! rtspclientsink " +
-						"location=rtsp://" + ownDockerIP + ":8554/teststream protocols=" + conf.publishProto + " latency=0 timeout=0 rtx-time=0",
+					"filesrc location=emptyvideo.ts ! tsdemux ! video/x-h264 ! rtspclientsink " +
+						"location=" + proto + "://" + ownDockerIP + ":" + port + "/teststream " +
+						"protocols=" + ca.publisherProto + " tls-validation-flags=0 latency=0 timeout=0 rtx-time=0",
 				})
 				require.NoError(t, err)
 				defer cnt1.close()
+
+				time.Sleep(1 * time.Second)
 			}
 
 			time.Sleep(1 * time.Second)
 
-			cnt2, err := newContainer("ffmpeg", "dest", []string{
-				"-rtsp_transport", "udp",
-				"-i", "rtsp://" + ownDockerIP + ":8554/teststream",
-				"-vframes", "1",
-				"-f", "image2",
-				"-y", "/dev/null",
-			})
-			require.NoError(t, err)
-			defer cnt2.close()
-
-			require.Equal(t, 0, cnt2.wait())
-		})
-	}
-}
-
-func TestRead(t *testing.T) {
-	for _, conf := range []struct {
-		readSoft  string
-		readProto string
-	}{
-		{"ffmpeg", "udp"},
-		{"ffmpeg", "tcp"},
-		{"vlc", "udp"},
-		{"vlc", "tcp"},
-	} {
-		t.Run(conf.readSoft+"_"+conf.readProto, func(t *testing.T) {
-			p, err := testProgram("")
-			require.NoError(t, err)
-			defer p.close()
-
-			time.Sleep(1 * time.Second)
-
-			cnt1, err := newContainer("ffmpeg", "source", []string{
-				"-re",
-				"-stream_loop", "-1",
-				"-i", "/emptyvideo.ts",
-				"-c", "copy",
-				"-f", "rtsp",
-				"-rtsp_transport", "udp",
-				"rtsp://" + ownDockerIP + ":8554/teststream",
-			})
-			require.NoError(t, err)
-			defer cnt1.close()
-
-			time.Sleep(1 * time.Second)
-
-			switch conf.readSoft {
+			switch ca.readerSoft {
 			case "ffmpeg":
 				cnt2, err := newContainer("ffmpeg", "dest", []string{
-					"-rtsp_transport", conf.readProto,
-					"-i", "rtsp://" + ownDockerIP + ":8554/teststream",
+					"-rtsp_transport", ca.readerProto,
+					"-i", proto + "://" + ownDockerIP + ":" + port + "/teststream",
 					"-vframes", "1",
 					"-f", "image2",
 					"-y", "/dev/null",
 				})
 				require.NoError(t, err)
 				defer cnt2.close()
-
 				require.Equal(t, 0, cnt2.wait())
 
-			default:
+			case "gstreamer":
+				cnt2, err := newContainer("gstreamer", "read", []string{
+					"rtspsrc location=" + proto + "://" + ownDockerIP + ":" + port + "/teststream protocols=tcp tls-validation-flags=0 latency=0 " +
+						"! application/x-rtp,media=video ! decodebin ! exitafterframe ! fakesink",
+				})
+				require.NoError(t, err)
+				defer cnt2.close()
+				require.Equal(t, 0, cnt2.wait())
+
+			case "vlc":
 				args := []string{}
-				if conf.readProto == "tcp" {
+				if ca.readerProto == "tcp" {
 					args = append(args, "--rtsp-tcp")
 				}
-				args = append(args, "rtsp://"+ownDockerIP+":8554/teststream")
-
+				args = append(args, proto+"://"+ownDockerIP+":"+port+"/teststream")
 				cnt2, err := newContainer("vlc", "dest", args)
 				require.NoError(t, err)
 				defer cnt2.close()
-
 				require.Equal(t, 0, cnt2.wait())
 			}
 		})
@@ -355,8 +430,8 @@ func TestRead(t *testing.T) {
 }
 
 func TestTCPOnly(t *testing.T) {
-	p, err := testProgram("protocols: [tcp]\n")
-	require.NoError(t, err)
+	p, ok := testProgram("protocols: [tcp]\n")
+	require.Equal(t, true, ok)
 	defer p.close()
 
 	time.Sleep(1 * time.Second)
@@ -364,7 +439,7 @@ func TestTCPOnly(t *testing.T) {
 	cnt1, err := newContainer("ffmpeg", "source", []string{
 		"-re",
 		"-stream_loop", "-1",
-		"-i", "/emptyvideo.ts",
+		"-i", "emptyvideo.ts",
 		"-c", "copy",
 		"-f", "rtsp",
 		"-rtsp_transport", "tcp",
@@ -387,8 +462,8 @@ func TestTCPOnly(t *testing.T) {
 }
 
 func TestPathWithSlash(t *testing.T) {
-	p, err := testProgram("")
-	require.NoError(t, err)
+	p, ok := testProgram("")
+	require.Equal(t, true, ok)
 	defer p.close()
 
 	time.Sleep(1 * time.Second)
@@ -396,7 +471,7 @@ func TestPathWithSlash(t *testing.T) {
 	cnt1, err := newContainer("ffmpeg", "source", []string{
 		"-re",
 		"-stream_loop", "-1",
-		"-i", "/emptyvideo.ts",
+		"-i", "emptyvideo.ts",
 		"-c", "copy",
 		"-f", "rtsp",
 		"-rtsp_transport", "udp",
@@ -419,8 +494,8 @@ func TestPathWithSlash(t *testing.T) {
 }
 
 func TestPathWithQuery(t *testing.T) {
-	p, err := testProgram("")
-	require.NoError(t, err)
+	p, ok := testProgram("")
+	require.Equal(t, true, ok)
 	defer p.close()
 
 	time.Sleep(1 * time.Second)
@@ -428,7 +503,7 @@ func TestPathWithQuery(t *testing.T) {
 	cnt1, err := newContainer("ffmpeg", "source", []string{
 		"-re",
 		"-stream_loop", "-1",
-		"-i", "/emptyvideo.ts",
+		"-i", "emptyvideo.ts",
 		"-c", "copy",
 		"-f", "rtsp",
 		"-rtsp_transport", "udp",
@@ -452,12 +527,12 @@ func TestPathWithQuery(t *testing.T) {
 
 func TestAuth(t *testing.T) {
 	t.Run("publish", func(t *testing.T) {
-		p, err := testProgram("paths:\n" +
+		p, ok := testProgram("paths:\n" +
 			"  all:\n" +
 			"    publishUser: testuser\n" +
 			"    publishPass: test!$()*+.;<=>[]^_-{}\n" +
 			"    publishIps: [172.17.0.0/16]\n")
-		require.NoError(t, err)
+		require.Equal(t, true, ok)
 		defer p.close()
 
 		time.Sleep(1 * time.Second)
@@ -465,7 +540,7 @@ func TestAuth(t *testing.T) {
 		cnt1, err := newContainer("ffmpeg", "source", []string{
 			"-re",
 			"-stream_loop", "-1",
-			"-i", "/emptyvideo.ts",
+			"-i", "emptyvideo.ts",
 			"-c", "copy",
 			"-f", "rtsp",
 			"-rtsp_transport", "udp",
@@ -494,12 +569,12 @@ func TestAuth(t *testing.T) {
 		"vlc",
 	} {
 		t.Run("read_"+soft, func(t *testing.T) {
-			p, err := testProgram("paths:\n" +
+			p, ok := testProgram("paths:\n" +
 				"  all:\n" +
 				"    readUser: testuser\n" +
 				"    readPass: test!$()*+.;<=>[]^_-{}\n" +
 				"    readIps: [172.17.0.0/16]\n")
-			require.NoError(t, err)
+			require.Equal(t, true, ok)
 			defer p.close()
 
 			time.Sleep(1 * time.Second)
@@ -507,7 +582,7 @@ func TestAuth(t *testing.T) {
 			cnt1, err := newContainer("ffmpeg", "source", []string{
 				"-re",
 				"-stream_loop", "-1",
-				"-i", "/emptyvideo.ts",
+				"-i", "emptyvideo.ts",
 				"-c", "copy",
 				"-f", "rtsp",
 				"-rtsp_transport", "udp",
@@ -544,11 +619,12 @@ func TestAuth(t *testing.T) {
 	}
 }
 
-func TestAuthIpFail(t *testing.T) {
-	p, err := testProgram("paths:\n" +
+func TestAuthHashed(t *testing.T) {
+	p, ok := testProgram("paths:\n" +
 		"  all:\n" +
-		"    publishIps: [127.0.0.1/32]\n")
-	require.NoError(t, err)
+		"    readUser: sha256:rl3rgi4NcZkpAEcacZnQ2VuOfJ0FxAqCRaKB/SwdZoQ=\n" +
+		"    readPass: sha256:E9JJ8stBJ7QM+nV4ZoUCeHk/gU3tPFh/5YieiJp6n2w=\n")
+	require.Equal(t, true, ok)
 	defer p.close()
 
 	time.Sleep(1 * time.Second)
@@ -556,7 +632,161 @@ func TestAuthIpFail(t *testing.T) {
 	cnt1, err := newContainer("ffmpeg", "source", []string{
 		"-re",
 		"-stream_loop", "-1",
-		"-i", "/emptyvideo.ts",
+		"-i", "emptyvideo.ts",
+		"-c", "copy",
+		"-f", "rtsp",
+		"-rtsp_transport", "udp",
+		"rtsp://" + ownDockerIP + ":8554/test/stream",
+	})
+	require.NoError(t, err)
+	defer cnt1.close()
+
+	cnt2, err := newContainer("ffmpeg", "dest", []string{
+		"-rtsp_transport", "udp",
+		"-i", "rtsp://testuser:testpass@" + ownDockerIP + ":8554/test/stream",
+		"-vframes", "1",
+		"-f", "image2",
+		"-y", "/dev/null",
+	})
+	require.NoError(t, err)
+	defer cnt2.close()
+
+	require.Equal(t, 0, cnt2.wait())
+}
+
+func TestAuthFail(t *testing.T) {
+	for _, ca := range []struct {
+		name string
+		user string
+		pass string
+	}{
+		{
+			"publish_wronguser",
+			"test1user",
+			"testpass",
+		},
+		{
+			"publish_wrongpass",
+			"testuser",
+			"test1pass",
+		},
+		{
+			"publish_wrongboth",
+			"test1user",
+			"test1pass",
+		},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			p, ok := testProgram("paths:\n" +
+				"  all:\n" +
+				"    publishUser: testuser\n" +
+				"    publishPass: testpass\n")
+			require.Equal(t, true, ok)
+			defer p.close()
+
+			time.Sleep(1 * time.Second)
+
+			cnt1, err := newContainer("ffmpeg", "source", []string{
+				"-re",
+				"-stream_loop", "-1",
+				"-i", "emptyvideo.ts",
+				"-c", "copy",
+				"-f", "rtsp",
+				"-rtsp_transport", "udp",
+				"rtsp://" + ca.user + ":" + ca.pass + "@" + ownDockerIP + ":8554/test/stream",
+			})
+			require.NoError(t, err)
+			defer cnt1.close()
+
+			time.Sleep(1 * time.Second)
+
+			cnt2, err := newContainer("ffmpeg", "dest", []string{
+				"-rtsp_transport", "udp",
+				"-i", "rtsp://" + ownDockerIP + ":8554/test/stream",
+				"-vframes", "1",
+				"-f", "image2",
+				"-y", "/dev/null",
+			})
+			require.NoError(t, err)
+			defer cnt2.close()
+
+			require.Equal(t, 1, cnt2.wait())
+		})
+	}
+
+	for _, ca := range []struct {
+		name string
+		user string
+		pass string
+	}{
+		{
+			"read_wronguser",
+			"test1user",
+			"testpass",
+		},
+		{
+			"read_wrongpass",
+			"testuser",
+			"test1pass",
+		},
+		{
+			"read_wrongboth",
+			"test1user",
+			"test1pass",
+		},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			p, ok := testProgram("paths:\n" +
+				"  all:\n" +
+				"    readUser: testuser\n" +
+				"    readPass: testpass\n")
+			require.Equal(t, true, ok)
+			defer p.close()
+
+			time.Sleep(1 * time.Second)
+
+			cnt1, err := newContainer("ffmpeg", "source", []string{
+				"-re",
+				"-stream_loop", "-1",
+				"-i", "emptyvideo.ts",
+				"-c", "copy",
+				"-f", "rtsp",
+				"-rtsp_transport", "udp",
+				"rtsp://" + ownDockerIP + ":8554/test/stream",
+			})
+			require.NoError(t, err)
+			defer cnt1.close()
+
+			time.Sleep(1 * time.Second)
+
+			cnt2, err := newContainer("ffmpeg", "dest", []string{
+				"-rtsp_transport", "udp",
+				"-i", "rtsp://" + ca.user + ":" + ca.pass + "@" + ownDockerIP + ":8554/test/stream",
+				"-vframes", "1",
+				"-f", "image2",
+				"-y", "/dev/null",
+			})
+			require.NoError(t, err)
+			defer cnt2.close()
+
+			require.Equal(t, 1, cnt2.wait())
+		})
+	}
+}
+
+func TestAuthIpFail(t *testing.T) {
+	p, ok := testProgram("paths:\n" +
+		"  all:\n" +
+		"    publishIps: [127.0.0.1/32]\n")
+	require.Equal(t, true, ok)
+	defer p.close()
+
+	time.Sleep(1 * time.Second)
+
+	cnt1, err := newContainer("ffmpeg", "source", []string{
+		"-re",
+		"-stream_loop", "-1",
+		"-i", "emptyvideo.ts",
 		"-c", "copy",
 		"-f", "rtsp",
 		"-rtsp_transport", "udp",
@@ -574,11 +804,11 @@ func TestSourceRtsp(t *testing.T) {
 		"tcp",
 	} {
 		t.Run(proto, func(t *testing.T) {
-			p1, err := testProgram("paths:\n" +
+			p1, ok := testProgram("paths:\n" +
 				"  all:\n" +
 				"    readUser: testuser\n" +
 				"    readPass: testpass\n")
-			require.NoError(t, err)
+			require.Equal(t, true, ok)
 			defer p1.close()
 
 			time.Sleep(1 * time.Second)
@@ -586,7 +816,7 @@ func TestSourceRtsp(t *testing.T) {
 			cnt1, err := newContainer("ffmpeg", "source", []string{
 				"-re",
 				"-stream_loop", "-1",
-				"-i", "/emptyvideo.ts",
+				"-i", "emptyvideo.ts",
 				"-c", "copy",
 				"-f", "rtsp",
 				"-rtsp_transport", "udp",
@@ -597,7 +827,7 @@ func TestSourceRtsp(t *testing.T) {
 
 			time.Sleep(1 * time.Second)
 
-			p2, err := testProgram("rtspPort: 8555\n" +
+			p2, ok := testProgram("rtspPort: 8555\n" +
 				"rtpPort: 8100\n" +
 				"rtcpPort: 8101\n" +
 				"\n" +
@@ -606,7 +836,7 @@ func TestSourceRtsp(t *testing.T) {
 				"    source: rtsp://testuser:testpass@localhost:8554/teststream\n" +
 				"    sourceProtocol: " + proto + "\n" +
 				"    sourceOnDemand: yes\n")
-			require.NoError(t, err)
+			require.Equal(t, true, ok)
 			defer p2.close()
 
 			time.Sleep(1 * time.Second)
@@ -626,6 +856,68 @@ func TestSourceRtsp(t *testing.T) {
 	}
 }
 
+func TestSourceRtsps(t *testing.T) {
+	serverCertFpath, err := writeTempFile(serverCert)
+	require.NoError(t, err)
+	defer os.Remove(serverCertFpath)
+
+	serverKeyFpath, err := writeTempFile(serverKey)
+	require.NoError(t, err)
+	defer os.Remove(serverKeyFpath)
+
+	p, ok := testProgram("readTimeout: 20s\n" +
+		"protocols: [tcp]\n" +
+		"encryption: yes\n" +
+		"serverCert: " + serverCertFpath + "\n" +
+		"serverKey: " + serverKeyFpath + "\n" +
+		"paths:\n" +
+		"  all:\n" +
+		"    readUser: testuser\n" +
+		"    readPass: testpass\n")
+	require.Equal(t, true, ok)
+	defer p.close()
+
+	time.Sleep(1 * time.Second)
+
+	cnt1, err := newContainer("ffmpeg", "source", []string{
+		"-re",
+		"-stream_loop", "-1",
+		"-i", "emptyvideo.ts",
+		"-c", "copy",
+		"-f", "rtsp",
+		"rtsps://" + ownDockerIP + ":8555/teststream",
+	})
+	require.NoError(t, err)
+	defer cnt1.close()
+
+	time.Sleep(1 * time.Second)
+
+	p2, ok := testProgram("rtspPort: 8556\n" +
+		"rtpPort: 8100\n" +
+		"rtcpPort: 8101\n" +
+		"\n" +
+		"paths:\n" +
+		"  proxied:\n" +
+		"    source: rtsps://testuser:testpass@localhost:8555/teststream\n" +
+		"    sourceOnDemand: yes\n")
+	require.Equal(t, true, ok)
+	defer p2.close()
+
+	time.Sleep(1 * time.Second)
+
+	cnt2, err := newContainer("ffmpeg", "dest", []string{
+		"-rtsp_transport", "udp",
+		"-i", "rtsp://" + ownDockerIP + ":8556/proxied",
+		"-vframes", "1",
+		"-f", "image2",
+		"-y", "/dev/null",
+	})
+	require.NoError(t, err)
+	defer cnt2.close()
+
+	require.Equal(t, 0, cnt2.wait())
+}
+
 func TestSourceRtmp(t *testing.T) {
 	cnt1, err := newContainer("nginx-rtmp", "rtmpserver", []string{})
 	require.NoError(t, err)
@@ -636,7 +928,7 @@ func TestSourceRtmp(t *testing.T) {
 	cnt2, err := newContainer("ffmpeg", "source", []string{
 		"-re",
 		"-stream_loop", "-1",
-		"-i", "/emptyvideo.ts",
+		"-i", "emptyvideo.ts",
 		"-c", "copy",
 		"-f", "flv",
 		"rtmp://" + cnt1.ip() + "/stream/test",
@@ -646,11 +938,11 @@ func TestSourceRtmp(t *testing.T) {
 
 	time.Sleep(1 * time.Second)
 
-	p, err := testProgram("paths:\n" +
+	p, ok := testProgram("paths:\n" +
 		"  proxied:\n" +
 		"    source: rtmp://" + cnt1.ip() + "/stream/test\n" +
 		"    sourceOnDemand: yes\n")
-	require.NoError(t, err)
+	require.Equal(t, true, ok)
 	defer p.close()
 
 	time.Sleep(1 * time.Second)
@@ -669,12 +961,12 @@ func TestSourceRtmp(t *testing.T) {
 }
 
 func TestRedirect(t *testing.T) {
-	p1, err := testProgram("paths:\n" +
+	p1, ok := testProgram("paths:\n" +
 		"  path1:\n" +
 		"    source: redirect\n" +
 		"    sourceRedirect: rtsp://" + ownDockerIP + ":8554/path2\n" +
 		"  path2:\n")
-	require.NoError(t, err)
+	require.Equal(t, true, ok)
 	defer p1.close()
 
 	time.Sleep(1 * time.Second)
@@ -682,7 +974,7 @@ func TestRedirect(t *testing.T) {
 	cnt1, err := newContainer("ffmpeg", "source", []string{
 		"-re",
 		"-stream_loop", "-1",
-		"-i", "/emptyvideo.ts",
+		"-i", "emptyvideo.ts",
 		"-c", "copy",
 		"-f", "rtsp",
 		"-rtsp_transport", "udp",
@@ -707,11 +999,11 @@ func TestRedirect(t *testing.T) {
 }
 
 func TestFallback(t *testing.T) {
-	p1, err := testProgram("paths:\n" +
+	p1, ok := testProgram("paths:\n" +
 		"  path1:\n" +
 		"    fallback: rtsp://" + ownDockerIP + ":8554/path2\n" +
 		"  path2:\n")
-	require.NoError(t, err)
+	require.Equal(t, true, ok)
 	defer p1.close()
 
 	time.Sleep(1 * time.Second)
@@ -719,7 +1011,7 @@ func TestFallback(t *testing.T) {
 	cnt1, err := newContainer("ffmpeg", "source", []string{
 		"-re",
 		"-stream_loop", "-1",
-		"-i", "/emptyvideo.ts",
+		"-i", "emptyvideo.ts",
 		"-c", "copy",
 		"-f", "rtsp",
 		"-rtsp_transport", "udp",
@@ -744,10 +1036,10 @@ func TestFallback(t *testing.T) {
 }
 
 func TestRunOnDemand(t *testing.T) {
-	p1, err := testProgram("paths:\n" +
+	p1, ok := testProgram("paths:\n" +
 		"  all:\n" +
 		"    runOnDemand: ffmpeg -hide_banner -loglevel error -re -i testimages/ffmpeg/emptyvideo.ts -c copy -f rtsp rtsp://localhost:$RTSP_PORT/$RTSP_PATH\n")
-	require.NoError(t, err)
+	require.Equal(t, true, ok)
 	defer p1.close()
 
 	time.Sleep(1 * time.Second)
@@ -778,8 +1070,8 @@ func TestHotReloading(t *testing.T) {
 	require.NoError(t, err)
 	defer os.Remove(confPath)
 
-	p, err := newProgram([]string{confPath})
-	require.NoError(t, err)
+	p, ok := newProgram([]string{confPath})
+	require.Equal(t, true, ok)
 	defer p.close()
 
 	time.Sleep(1 * time.Second)

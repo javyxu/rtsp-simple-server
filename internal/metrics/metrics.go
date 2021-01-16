@@ -2,23 +2,29 @@ package metrics
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
+	"github.com/aler9/rtsp-simple-server/internal/logger"
 	"github.com/aler9/rtsp-simple-server/internal/stats"
 )
 
 const (
-	address = ":9998"
+	port = 9998
 )
+
+func formatMetric(key string, value int64, nowUnix int64) string {
+	return key + " " + strconv.FormatInt(value, 10) + " " +
+		strconv.FormatInt(nowUnix, 10) + "\n"
+}
 
 // Parent is implemented by program.
 type Parent interface {
-	Log(string, ...interface{})
+	Log(logger.Level, string, ...interface{})
 }
 
 // Metrics is a metrics exporter.
@@ -31,7 +37,13 @@ type Metrics struct {
 }
 
 // New allocates a metrics.
-func New(stats *stats.Stats, parent Parent) (*Metrics, error) {
+func New(
+	listenIP string,
+	stats *stats.Stats,
+	parent Parent,
+) (*Metrics, error) {
+
+	address := listenIP + ":" + strconv.FormatInt(port, 10)
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
@@ -49,7 +61,7 @@ func New(stats *stats.Stats, parent Parent) (*Metrics, error) {
 		Handler: m.mux,
 	}
 
-	parent.Log("[metrics] opened on " + address)
+	parent.Log(logger.Info, "[metrics] opened on "+address)
 
 	go m.run()
 	return m, nil
@@ -68,7 +80,7 @@ func (m *Metrics) run() {
 }
 
 func (m *Metrics) onMetrics(w http.ResponseWriter, req *http.Request) {
-	now := time.Now().UnixNano() / 1000000
+	nowUnix := time.Now().UnixNano() / 1000000
 
 	countClients := atomic.LoadInt64(m.stats.CountClients)
 	countPublishers := atomic.LoadInt64(m.stats.CountPublishers)
@@ -79,20 +91,20 @@ func (m *Metrics) onMetrics(w http.ResponseWriter, req *http.Request) {
 	countSourcesRtmpRunning := atomic.LoadInt64(m.stats.CountSourcesRtmpRunning)
 
 	out := ""
-	out += fmt.Sprintf("rtsp_clients{state=\"idle\"} %d %v\n",
-		countClients-countPublishers-countReaders, now)
-	out += fmt.Sprintf("rtsp_clients{state=\"publishing\"} %d %v\n",
-		countPublishers, now)
-	out += fmt.Sprintf("rtsp_clients{state=\"reading\"} %d %v\n",
-		countReaders, now)
-	out += fmt.Sprintf("rtsp_sources{type=\"rtsp\",state=\"idle\"} %d %v\n",
-		countSourcesRtsp-countSourcesRtspRunning, now)
-	out += fmt.Sprintf("rtsp_sources{type=\"rtsp\",state=\"running\"} %d %v\n",
-		countSourcesRtspRunning, now)
-	out += fmt.Sprintf("rtsp_sources{type=\"rtmp\",state=\"idle\"} %d %v\n",
-		countSourcesRtmp-countSourcesRtmpRunning, now)
-	out += fmt.Sprintf("rtsp_sources{type=\"rtmp\",state=\"running\"} %d %v\n",
-		countSourcesRtmpRunning, now)
+	out += formatMetric("rtsp_clients{state=\"idle\"}",
+		countClients-countPublishers-countReaders, nowUnix)
+	out += formatMetric("rtsp_clients{state=\"publishing\"}",
+		countPublishers, nowUnix)
+	out += formatMetric("rtsp_clients{state=\"reading\"}",
+		countReaders, nowUnix)
+	out += formatMetric("rtsp_sources{type=\"rtsp\",state=\"idle\"}",
+		countSourcesRtsp-countSourcesRtspRunning, nowUnix)
+	out += formatMetric("rtsp_sources{type=\"rtsp\",state=\"running\"}",
+		countSourcesRtspRunning, nowUnix)
+	out += formatMetric("rtsp_sources{type=\"rtmp\",state=\"idle\"}",
+		countSourcesRtmp-countSourcesRtmpRunning, nowUnix)
+	out += formatMetric("rtsp_sources{type=\"rtmp\",state=\"running\"}",
+		countSourcesRtmpRunning, nowUnix)
 
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, out)

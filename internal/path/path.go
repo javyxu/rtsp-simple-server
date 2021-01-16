@@ -14,6 +14,7 @@ import (
 	"github.com/aler9/rtsp-simple-server/internal/client"
 	"github.com/aler9/rtsp-simple-server/internal/conf"
 	"github.com/aler9/rtsp-simple-server/internal/externalcmd"
+	"github.com/aler9/rtsp-simple-server/internal/logger"
 	"github.com/aler9/rtsp-simple-server/internal/sourcertmp"
 	"github.com/aler9/rtsp-simple-server/internal/sourcertsp"
 	"github.com/aler9/rtsp-simple-server/internal/stats"
@@ -27,7 +28,7 @@ func newEmptyTimer() *time.Timer {
 
 // Parent is implemented by pathman.PathMan.
 type Parent interface {
-	Log(string, ...interface{})
+	Log(logger.Level, string, ...interface{})
 	OnPathClose(*Path)
 	OnPathClientClose(*client.Client)
 }
@@ -139,15 +140,16 @@ const (
 
 // Path is a path.
 type Path struct {
-	rtspPort     int
-	readTimeout  time.Duration
-	writeTimeout time.Duration
-	confName     string
-	conf         *conf.PathConf
-	name         string
-	wg           *sync.WaitGroup
-	stats        *stats.Stats
-	parent       Parent
+	rtspPort        int
+	readTimeout     time.Duration
+	writeTimeout    time.Duration
+	readBufferCount uint64
+	confName        string
+	conf            *conf.PathConf
+	name            string
+	wg              *sync.WaitGroup
+	stats           *stats.Stats
+	parent          Parent
 
 	clients                      map[*client.Client]clientState
 	clientsWg                    sync.WaitGroup
@@ -184,6 +186,7 @@ func New(
 	rtspPort int,
 	readTimeout time.Duration,
 	writeTimeout time.Duration,
+	readBufferCount uint64,
 	confName string,
 	conf *conf.PathConf,
 	name string,
@@ -195,6 +198,7 @@ func New(
 		rtspPort:              rtspPort,
 		readTimeout:           readTimeout,
 		writeTimeout:          writeTimeout,
+		readBufferCount:       readBufferCount,
 		confName:              confName,
 		conf:                  conf,
 		name:                  name,
@@ -230,8 +234,8 @@ func (pa *Path) Close() {
 }
 
 // Log is the main logging function.
-func (pa *Path) Log(format string, args ...interface{}) {
-	pa.parent.Log("[path "+pa.name+"] "+format, args...)
+func (pa *Path) Log(level logger.Level, format string, args ...interface{}) {
+	pa.parent.Log(level, "[path "+pa.name+"] "+format, args...)
 }
 
 func (pa *Path) run() {
@@ -246,7 +250,7 @@ func (pa *Path) run() {
 
 	var onInitCmd *externalcmd.Cmd
 	if pa.conf.RunOnInit != "" {
-		pa.Log("on init command started")
+		pa.Log(logger.Info, "on init command started")
 		onInitCmd = externalcmd.New(pa.conf.RunOnInit, pa.conf.RunOnInitRestart, externalcmd.Environment{
 			Path: pa.name,
 			Port: strconv.FormatInt(int64(pa.rtspPort), 10),
@@ -280,7 +284,7 @@ outer:
 
 		case <-pa.runOnDemandCloseTimer.C:
 			pa.runOnDemandCloseTimerStarted = false
-			pa.Log("on demand command stopped")
+			pa.Log(logger.Info, "on demand command stopped")
 			pa.onDemandCmd.Close()
 			pa.onDemandCmd = nil
 
@@ -364,7 +368,7 @@ outer:
 	pa.closeTimer.Stop()
 
 	if onInitCmd != nil {
-		pa.Log("on init command stopped")
+		pa.Log(logger.Info, "on init command stopped")
 		onInitCmd.Close()
 	}
 
@@ -374,7 +378,7 @@ outer:
 	pa.sourceWg.Wait()
 
 	if pa.onDemandCmd != nil {
-		pa.Log("on demand command stopped")
+		pa.Log(logger.Info, "on demand command stopped")
 		pa.onDemandCmd.Close()
 	}
 
@@ -474,16 +478,29 @@ func (pa *Path) exhaustChannels() {
 
 func (pa *Path) hasExternalSource() bool {
 	return strings.HasPrefix(pa.conf.Source, "rtsp://") ||
+		strings.HasPrefix(pa.conf.Source, "rtsps://") ||
 		strings.HasPrefix(pa.conf.Source, "rtmp://")
 }
 
 func (pa *Path) startExternalSource() {
-	if strings.HasPrefix(pa.conf.Source, "rtsp://") {
-		pa.source = sourcertsp.New(pa.conf.Source, pa.conf.SourceProtocolParsed,
-			pa.readTimeout, pa.writeTimeout, &pa.sourceWg, pa.stats, pa)
+	if strings.HasPrefix(pa.conf.Source, "rtsp://") ||
+		strings.HasPrefix(pa.conf.Source, "rtsps://") {
+		pa.source = sourcertsp.New(
+			pa.conf.Source,
+			pa.conf.SourceProtocolParsed,
+			pa.readTimeout,
+			pa.writeTimeout,
+			pa.readBufferCount,
+			&pa.sourceWg,
+			pa.stats,
+			pa)
 
 	} else if strings.HasPrefix(pa.conf.Source, "rtmp://") {
-		pa.source = sourcertmp.New(pa.conf.Source, &pa.sourceWg, pa.stats, pa)
+		pa.source = sourcertmp.New(
+			pa.conf.Source,
+			&pa.sourceWg,
+			pa.stats,
+			pa)
 	}
 }
 
@@ -609,7 +626,7 @@ func (pa *Path) onClientDescribe(c *client.Client) {
 	// start on-demand command
 	if pa.conf.RunOnDemand != "" {
 		if pa.onDemandCmd == nil {
-			pa.Log("on demand command started")
+			pa.Log(logger.Info, "on demand command started")
 			pa.onDemandCmd = externalcmd.New(pa.conf.RunOnDemand, pa.conf.RunOnDemandRestart, externalcmd.Environment{
 				Path: pa.name,
 				Port: strconv.FormatInt(int64(pa.rtspPort), 10),

@@ -1,18 +1,20 @@
-package servertcp
+package serverplain
 
 import (
 	"strconv"
 	"time"
 
 	"github.com/aler9/gortsplib"
+
+	"github.com/aler9/rtsp-simple-server/internal/logger"
 )
 
 // Parent is implemented by program.
 type Parent interface {
-	Log(string, ...interface{})
+	Log(logger.Level, string, ...interface{})
 }
 
-// Server is a RTSP TCP server.
+// Server is a TCP/RTSP listener.
 type Server struct {
 	parent Parent
 
@@ -24,18 +26,26 @@ type Server struct {
 }
 
 // New allocates a Server.
-func New(port int,
+func New(
+	listenIP string,
+	port int,
 	readTimeout time.Duration,
 	writeTimeout time.Duration,
+	readBufferCount uint64,
+	udpRTPListener *gortsplib.ServerUDPListener,
+	udpRTCPListener *gortsplib.ServerUDPListener,
 	parent Parent) (*Server, error) {
 
 	conf := gortsplib.ServerConf{
 		ReadTimeout:     readTimeout,
 		WriteTimeout:    writeTimeout,
-		ReadBufferCount: 1,
+		ReadBufferCount: readBufferCount,
+		UDPRTPListener:  udpRTPListener,
+		UDPRTCPListener: udpRTCPListener,
 	}
 
-	srv, err := conf.Serve(":"+strconv.FormatInt(int64(port), 10), nil)
+	address := listenIP + ":" + strconv.FormatInt(int64(port), 10)
+	srv, err := conf.Serve(address)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +57,7 @@ func New(port int,
 		done:   make(chan struct{}),
 	}
 
-	parent.Log("[TCP server] opened on :%d", port)
+	parent.Log(logger.Info, "[TCP/RTSP listener] opened on %s", address)
 
 	go s.run()
 	return s, nil
@@ -80,6 +90,6 @@ func (s *Server) run() {
 }
 
 // Accept returns a channel to accept incoming connections.
-func (s *Server) Accept() <-chan *gortsplib.ServerConn {
+func (s *Server) Accept() chan *gortsplib.ServerConn {
 	return s.accept
 }

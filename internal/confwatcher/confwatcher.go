@@ -1,6 +1,7 @@
 package confwatcher
 
 import (
+	"os"
 	"path/filepath"
 	"time"
 
@@ -14,7 +15,8 @@ const (
 
 // ConfWatcher is a configuration file watcher.
 type ConfWatcher struct {
-	inner *fsnotify.Watcher
+	inner       *fsnotify.Watcher
+	watchedPath string
 
 	// out
 	signal chan struct{}
@@ -23,24 +25,30 @@ type ConfWatcher struct {
 
 // New allocates a ConfWatcher.
 func New(confPath string) (*ConfWatcher, error) {
+	if _, err := os.Stat(confPath); err != nil {
+		return nil, err
+	}
+
 	inner, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 
-	// use absolute path to support Darwin
+	// use absolute paths to support Darwin
 	absolutePath, _ := filepath.Abs(confPath)
+	parentPath := filepath.Dir(absolutePath)
 
-	err = inner.Add(absolutePath)
+	err = inner.Add(parentPath)
 	if err != nil {
 		inner.Close()
 		return nil, err
 	}
 
 	w := &ConfWatcher{
-		inner:  inner,
-		signal: make(chan struct{}),
-		done:   make(chan struct{}),
+		inner:       inner,
+		watchedPath: absolutePath,
+		signal:      make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 
 	go w.run()
@@ -61,6 +69,7 @@ func (w *ConfWatcher) run() {
 	defer close(w.done)
 
 	var lastCalled time.Time
+	previousWatchedPath, _ := filepath.EvalSymlinks(w.watchedPath)
 
 outer:
 	for {
@@ -70,10 +79,19 @@ outer:
 				continue
 			}
 
-			if (event.Op&fsnotify.Write) == fsnotify.Write ||
-				(event.Op&fsnotify.Create) == fsnotify.Create {
+			currentWatchedPath, _ := filepath.EvalSymlinks(w.watchedPath)
+			eventPath, _ := filepath.Abs(event.Name)
+
+			if currentWatchedPath == "" {
+				// watched file was removed; wait for write event to trigger reload
+				previousWatchedPath = ""
+			} else if currentWatchedPath != previousWatchedPath ||
+				(eventPath == currentWatchedPath &&
+					((event.Op&fsnotify.Write) == fsnotify.Write ||
+						(event.Op&fsnotify.Create) == fsnotify.Create)) {
 				// wait some additional time to allow the writer to complete its job
 				time.Sleep(additionalWait)
+				previousWatchedPath = currentWatchedPath
 
 				lastCalled = time.Now()
 				w.signal <- struct{}{}

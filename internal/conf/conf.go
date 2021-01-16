@@ -10,31 +10,91 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/aler9/rtsp-simple-server/internal/confenv"
-	"github.com/aler9/rtsp-simple-server/internal/loghandler"
+	"github.com/aler9/rtsp-simple-server/internal/logger"
+)
+
+// Encryption is an encryption policy.
+type Encryption int
+
+// encryption policies.
+const (
+	EncryptionNo Encryption = iota
+	EncryptionOptional
+	EncryptionStrict
 )
 
 // Conf is the main program configuration.
 type Conf struct {
+	LogLevel              string                                `yaml:"logLevel"`
+	LogLevelParsed        logger.Level                          `yaml:"-" json:"-"`
+	LogDestinations       []string                              `yaml:"logDestinations"`
+	LogDestinationsParsed map[logger.Destination]struct{}       `yaml:"-" json:"-"`
+	LogFile               string                                `yaml:"logFile"`
 	Protocols             []string                              `yaml:"protocols"`
 	ProtocolsParsed       map[gortsplib.StreamProtocol]struct{} `yaml:"-" json:"-"`
+	Encryption            string                                `yaml:"encryption"`
+	EncryptionParsed      Encryption                            `yaml:"-" json:"-"`
+	ListenIP              string                                `yaml:"listenIP"`
 	RtspPort              int                                   `yaml:"rtspPort"`
-	RtpPort               int                                   `yaml:"rtpPort"`
-	RtcpPort              int                                   `yaml:"rtcpPort"`
-	RunOnConnect          string                                `yaml:"runOnConnect"`
-	RunOnConnectRestart   bool                                  `yaml:"runOnConnectRestart"`
-	ReadTimeout           time.Duration                         `yaml:"readTimeout"`
-	WriteTimeout          time.Duration                         `yaml:"writeTimeout"`
+	RtspsPort             int                                   `yaml:"rtspsPort"`
+	RTPPort               int                                   `yaml:"rtpPort"`
+	RTCPPort              int                                   `yaml:"rtcpPort"`
+	ServerKey             string                                `yaml:"serverKey"`
+	ServerCert            string                                `yaml:"serverCert"`
 	AuthMethods           []string                              `yaml:"authMethods"`
 	AuthMethodsParsed     []headers.AuthMethod                  `yaml:"-" json:"-"`
+	ReadTimeout           time.Duration                         `yaml:"readTimeout"`
+	WriteTimeout          time.Duration                         `yaml:"writeTimeout"`
+	ReadBufferCount       uint64                                `yaml:"readBufferCount"`
 	Metrics               bool                                  `yaml:"metrics"`
 	Pprof                 bool                                  `yaml:"pprof"`
-	LogDestinations       []string                              `yaml:"logDestinations"`
-	LogDestinationsParsed map[loghandler.Destination]struct{}   `yaml:"-" json:"-"`
-	LogFile               string                                `yaml:"logFile"`
+	RunOnConnect          string                                `yaml:"runOnConnect"`
+	RunOnConnectRestart   bool                                  `yaml:"runOnConnectRestart"`
 	Paths                 map[string]*PathConf                  `yaml:"paths"`
 }
 
 func (conf *Conf) fillAndCheck() error {
+	if conf.LogLevel == "" {
+		conf.LogLevel = "info"
+	}
+	switch conf.LogLevel {
+	case "warn":
+		conf.LogLevelParsed = logger.Warn
+
+	case "info":
+		conf.LogLevelParsed = logger.Info
+
+	case "debug":
+		conf.LogLevelParsed = logger.Debug
+
+	default:
+		return fmt.Errorf("unsupported log level: %s", conf.LogLevel)
+	}
+
+	if len(conf.LogDestinations) == 0 {
+		conf.LogDestinations = []string{"stdout"}
+	}
+	conf.LogDestinationsParsed = make(map[logger.Destination]struct{})
+	for _, dest := range conf.LogDestinations {
+		switch dest {
+		case "stdout":
+			conf.LogDestinationsParsed[logger.DestinationStdout] = struct{}{}
+
+		case "file":
+			conf.LogDestinationsParsed[logger.DestinationFile] = struct{}{}
+
+		case "syslog":
+			conf.LogDestinationsParsed[logger.DestinationSyslog] = struct{}{}
+
+		default:
+			return fmt.Errorf("unsupported log destination: %s", dest)
+		}
+	}
+
+	if conf.LogFile == "" {
+		conf.LogFile = "rtsp-simple-server.log"
+	}
+
 	if len(conf.Protocols) == 0 {
 		conf.Protocols = []string{"udp", "tcp"}
 	}
@@ -55,27 +115,51 @@ func (conf *Conf) fillAndCheck() error {
 		return fmt.Errorf("no protocols provided")
 	}
 
+	if conf.Encryption == "" {
+		conf.Encryption = "no"
+	}
+	switch conf.Encryption {
+	case "no", "false":
+		conf.EncryptionParsed = EncryptionNo
+
+	case "optional":
+		conf.EncryptionParsed = EncryptionOptional
+
+	case "strict", "yes", "true":
+		conf.EncryptionParsed = EncryptionStrict
+
+		if _, ok := conf.ProtocolsParsed[gortsplib.StreamProtocolUDP]; ok {
+			return fmt.Errorf("encryption can't be used with the UDP stream protocol")
+		}
+
+	default:
+		return fmt.Errorf("unsupported encryption value: '%s'", conf.Encryption)
+	}
+
 	if conf.RtspPort == 0 {
 		conf.RtspPort = 8554
 	}
-	if conf.RtpPort == 0 {
-		conf.RtpPort = 8000
+	if conf.RtspsPort == 0 {
+		conf.RtspsPort = 8555
 	}
-	if (conf.RtpPort % 2) != 0 {
+	if conf.RTPPort == 0 {
+		conf.RTPPort = 8000
+	}
+	if (conf.RTPPort % 2) != 0 {
 		return fmt.Errorf("rtp port must be even")
 	}
-	if conf.RtcpPort == 0 {
-		conf.RtcpPort = 8001
+	if conf.RTCPPort == 0 {
+		conf.RTCPPort = 8001
 	}
-	if conf.RtcpPort != (conf.RtpPort + 1) {
+	if conf.RTCPPort != (conf.RTPPort + 1) {
 		return fmt.Errorf("rtcp and rtp ports must be consecutive")
 	}
 
-	if conf.ReadTimeout == 0 {
-		conf.ReadTimeout = 10 * time.Second
+	if conf.ServerKey == "" {
+		conf.ServerKey = "server.key"
 	}
-	if conf.WriteTimeout == 0 {
-		conf.WriteTimeout = 10 * time.Second
+	if conf.ServerCert == "" {
+		conf.ServerCert = "server.crt"
 	}
 
 	if len(conf.AuthMethods) == 0 {
@@ -94,27 +178,14 @@ func (conf *Conf) fillAndCheck() error {
 		}
 	}
 
-	if len(conf.LogDestinations) == 0 {
-		conf.LogDestinations = []string{"stdout"}
+	if conf.ReadTimeout == 0 {
+		conf.ReadTimeout = 10 * time.Second
 	}
-	conf.LogDestinationsParsed = make(map[loghandler.Destination]struct{})
-	for _, dest := range conf.LogDestinations {
-		switch dest {
-		case "stdout":
-			conf.LogDestinationsParsed[loghandler.DestinationStdout] = struct{}{}
-
-		case "file":
-			conf.LogDestinationsParsed[loghandler.DestinationFile] = struct{}{}
-
-		case "syslog":
-			conf.LogDestinationsParsed[loghandler.DestinationSyslog] = struct{}{}
-
-		default:
-			return fmt.Errorf("unsupported log destination: %s", dest)
-		}
+	if conf.WriteTimeout == 0 {
+		conf.WriteTimeout = 10 * time.Second
 	}
-	if conf.LogFile == "" {
-		conf.LogFile = "rtsp-simple-server.log"
+	if conf.ReadBufferCount == 0 {
+		conf.ReadBufferCount = 512
 	}
 
 	if len(conf.Paths) == 0 {

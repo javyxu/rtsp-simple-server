@@ -1,5 +1,6 @@
 
 BASE_IMAGE = golang:1.15-alpine3.12
+GO_LINT_IMAGE = golangci/golangci-lint:v1.33.0
 
 .PHONY: $(shell ls)
 
@@ -12,7 +13,7 @@ help:
 	@echo "  format         format source files"
 	@echo "  test           run tests"
 	@echo "  lint           run linters"
-	@echo "  stress NAME=n  run stress environment"
+	@echo "  bench NAME=n  run bench environment"
 	@echo "  run            run app"
 	@echo "  release        build release assets"
 	@echo "  dockerhub      build and push docker hub images"
@@ -56,12 +57,12 @@ test-nodocker:
 
 lint:
 	docker run --rm -v $(PWD):/app -w /app \
-	golangci/golangci-lint:v1.33.0 \
+	$(GO_LINT_IMAGE) \
 	golangci-lint run -v
 
-stress:
-	docker build -q . -f stress/$(NAME)/Dockerfile -t temp
-	docker run --rm -it --network=host temp
+bench:
+	docker build -q . -f bench/$(NAME)/Dockerfile -t temp
+	docker run --rm -it -p 9999:9999 temp
 
 define DOCKERFILE_RUN
 FROM amd64/$(BASE_IMAGE)
@@ -124,7 +125,7 @@ export DOCKERFILE_RELEASE
 
 release:
 	echo "$$DOCKERFILE_RELEASE" | docker build . -f - -t temp \
-	&& docker run --rm -it -v $(PWD):/out \
+	&& docker run --rm -v $(PWD):/out \
 	temp sh -c "rm -rf /out/release && cp -r /s/release /out/"
 
 release-nodocker:
@@ -175,6 +176,8 @@ export DOCKERFILE_DOCKERHUB
 dockerhub:
 	$(eval export DOCKER_CLI_EXPERIMENTAL=enabled)
 	$(eval VERSION := $(shell git describe --tags))
+
+	docker login -u $(DOCKER_USER) -p $(DOCKER_PASSWORD)
 
 	docker buildx rm builder 2>/dev/null || true
 	rm -rf $$HOME/.docker/manifests/*

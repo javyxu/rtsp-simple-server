@@ -8,15 +8,16 @@ import (
 	"github.com/aler9/gortsplib/pkg/base"
 
 	"github.com/aler9/rtsp-simple-server/internal/client"
+	"github.com/aler9/rtsp-simple-server/internal/logger"
 	"github.com/aler9/rtsp-simple-server/internal/pathman"
-	"github.com/aler9/rtsp-simple-server/internal/servertcp"
-	"github.com/aler9/rtsp-simple-server/internal/serverudp"
+	"github.com/aler9/rtsp-simple-server/internal/serverplain"
+	"github.com/aler9/rtsp-simple-server/internal/servertls"
 	"github.com/aler9/rtsp-simple-server/internal/stats"
 )
 
 // Parent is implemented by program.
 type Parent interface {
-	Log(string, ...interface{})
+	Log(logger.Level, string, ...interface{})
 }
 
 // ClientManager is a client.Client manager.
@@ -27,10 +28,9 @@ type ClientManager struct {
 	runOnConnectRestart bool
 	protocols           map[base.StreamProtocol]struct{}
 	stats               *stats.Stats
-	serverUDPRtp        *serverudp.Server
-	serverUDPRtcp       *serverudp.Server
 	pathMan             *pathman.PathManager
-	serverTCP           *servertcp.Server
+	serverPlain         *serverplain.Server
+	serverTLS           *servertls.Server
 	parent              Parent
 
 	clients map[*client.Client]struct{}
@@ -52,10 +52,9 @@ func New(
 	runOnConnectRestart bool,
 	protocols map[base.StreamProtocol]struct{},
 	stats *stats.Stats,
-	serverUDPRtp *serverudp.Server,
-	serverUDPRtcp *serverudp.Server,
 	pathMan *pathman.PathManager,
-	serverTCP *servertcp.Server,
+	serverPlain *serverplain.Server,
+	serverTLS *servertls.Server,
 	parent Parent) *ClientManager {
 
 	cm := &ClientManager{
@@ -65,10 +64,9 @@ func New(
 		runOnConnectRestart: runOnConnectRestart,
 		protocols:           protocols,
 		stats:               stats,
-		serverUDPRtp:        serverUDPRtp,
-		serverUDPRtcp:       serverUDPRtcp,
 		pathMan:             pathMan,
-		serverTCP:           serverTCP,
+		serverPlain:         serverPlain,
+		serverTLS:           serverTLS,
 		parent:              parent,
 		clients:             make(map[*client.Client]struct{}),
 		clientClose:         make(chan *client.Client),
@@ -87,20 +85,54 @@ func (cm *ClientManager) Close() {
 }
 
 // Log is the main logging function.
-func (cm *ClientManager) Log(format string, args ...interface{}) {
-	cm.parent.Log(format, args...)
+func (cm *ClientManager) Log(level logger.Level, format string, args ...interface{}) {
+	cm.parent.Log(level, format, args...)
 }
 
 func (cm *ClientManager) run() {
 	defer close(cm.done)
 
+	tcpAccept := func() chan *gortsplib.ServerConn {
+		if cm.serverPlain != nil {
+			return cm.serverPlain.Accept()
+		}
+		return make(chan *gortsplib.ServerConn)
+	}()
+
+	tlsAccept := func() chan *gortsplib.ServerConn {
+		if cm.serverTLS != nil {
+			return cm.serverTLS.Accept()
+		}
+		return make(chan *gortsplib.ServerConn)
+	}()
+
 outer:
 	for {
 		select {
-		case conn := <-cm.serverTCP.Accept():
-			c := client.New(cm.rtspPort, cm.readTimeout,
-				cm.runOnConnect, cm.runOnConnectRestart, cm.protocols, &cm.wg,
-				cm.stats, cm.serverUDPRtp, cm.serverUDPRtcp, conn, cm)
+		case conn := <-tcpAccept:
+			c := client.New(false,
+				cm.rtspPort,
+				cm.readTimeout,
+				cm.runOnConnect,
+				cm.runOnConnectRestart,
+				cm.protocols,
+				&cm.wg,
+				cm.stats,
+				conn,
+				cm)
+			cm.clients[c] = struct{}{}
+
+		case conn := <-tlsAccept:
+			c := client.New(true,
+				cm.rtspPort,
+				cm.readTimeout,
+				cm.runOnConnect,
+				cm.runOnConnectRestart,
+				cm.protocols,
+				&cm.wg,
+				cm.stats,
+				conn,
+				cm)
 			cm.clients[c] = struct{}{}
 
 		case c := <-cm.pathMan.ClientClose():

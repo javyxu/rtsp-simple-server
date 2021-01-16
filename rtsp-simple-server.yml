@@ -1,24 +1,44 @@
 
+# sets the verbosity of the program; available values are "warn", "info", "debug".
+logLevel: info
 # destinations of log messages; available values are "stdout", "file" and "syslog".
 logDestinations: [stdout]
 # if "file" is in logDestinations, this is the file which will receive the logs.
 logFile: rtsp-simple-server.log
 
-# supported stream protocols (the handshake is always performed with TCP).
+# supported stream protocols.
+# UDP is the most performant, but can cause problems if there's a NAT between
+# server and clients, and doesn't support encryption.
+# TCP is the most versatile, and does support encryption.
+# The handshake is always performed with TCP.
 protocols: [udp, tcp]
-# port of the TCP RTSP listener.
+# encrypt handshake and TCP streams with TLS (RTSPS).
+# available values are "no", "strict", "optional".
+encryption: no
+# listen IP. If provided, all listeners will listen on this specific IP.
+listenIP:
+# port of the TCP/RTSP listener. This is used only if encryption is "no" or "optional".
 rtspPort: 8554
-# port of the UDP RTP listener (used only if udp is in protocols).
+# port of the TCP/TLS/RTSPS listener. This is used only if encryption is "strict" or "optional".
+rtspsPort: 8555
+# port of the UDP/RTP listener. This is used only if "udp" is in protocols.
 rtpPort: 8000
-# port of the UDP RTCP listener (used only if udp is in protocols).
+# port of the UDP/RTCP listener. This is used only if "udp" is in protocols.
 rtcpPort: 8001
+# path to the server key. This is used only if encryption is "strict" or "optional".
+serverKey: server.key
+# path to the server certificate. This is used only if encryption is "strict" or "optional".
+serverCert: server.crt
+# authentication methods.
+authMethods: [basic, digest]
 # timeout of read operations.
 readTimeout: 10s
 # timeout of write operations.
 writeTimeout: 10s
-# supported authentication methods (both are insecure, use RTSP inside a VPN
-# to enforce security).
-authMethods: [basic, digest]
+# number of read buffers.
+# a higher number allows a higher throughput,
+# a lower number allows to save RAM.
+readBufferCount: 512
 
 # enable Prometheus-compatible metrics on port 9998.
 metrics: no
@@ -43,13 +63,16 @@ paths:
     # source of the stream - this can be:
     # * record -> the stream is provided by a RTSP client
     # * rtsp://existing-url -> the stream is pulled from another RTSP server
+    # * rtsps://existing-url -> the stream is pulled from another RTSP server
     # * rtmp://existing-url -> the stream is pulled from a RTMP server
     # * redirect -> the stream is provided by another path or server
     source: record
 
     # if the source is an RTSP url, this is the protocol that will be used to
     # pull the stream. available options are "automatic", "udp", "tcp".
+    # the tcp protocol can help to overcome the error "no UDP packets received recently".
     sourceProtocol: automatic
+
     # if the source is an RTSP or RTMP url, it will be pulled only when at least
     # one reader is connected, saving bandwidth.
     sourceOnDemand: no
@@ -68,15 +91,19 @@ paths:
     fallback:
 
     # username required to publish.
+    # sha256-hashed values can be inserted with the "sha256:" prefix.
     publishUser:
     # password required to publish.
+    # sha256-hashed values can be inserted with the "sha256:" prefix.
     publishPass:
     # ips or networks (x.x.x.x/24) allowed to publish.
     publishIps: []
 
     # username required to read.
+    # sha256-hashed values can be inserted with the "sha256:" prefix.
     readUser:
     # password required to read.
+    # sha256-hashed values can be inserted with the "sha256:" prefix.
     readPass:
     # ips or networks (x.x.x.x/24) allowed to read.
     readIps: []

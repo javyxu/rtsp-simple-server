@@ -12,6 +12,7 @@ Features:
 * Read and publish live streams with UDP and TCP
 * Each stream can have multiple video and audio tracks, encoded with any codec (including H264, H265, VP8, VP9, MP3, AAC, Opus, PCM)
 * Serve multiple streams at once in separate paths
+* Encrypt streams with TLS (RTSPS)
 * Pull and serve streams from other RTSP or RTMP servers, always or on-demand (RTSP proxy)
 * Authenticate readers and publishers separately
 * Redirect to other RTSP servers (load balancing)
@@ -19,7 +20,33 @@ Features:
 * Reload the configuration without disconnecting existing clients (hot reloading)
 * Compatible with Linux, Windows and macOS, does not require any dependency or interpreter, it's a single executable
 
-## Installation and basic usage
+## Table of contents
+
+* [Installation](#installation)
+  * [Standard](#standard)
+  * [Docker](#docker)
+* [Basic usage](#basic-usage)
+* [Advanced usage and FAQs](#advanced-usage-and-faqs)
+  * [Configuration](#configuration)
+  * [Encryption](#encryption)
+  * [Authentication](#authentication)
+  * [RTSP proxy mode](#rtsp-proxy-mode)
+  * [Publish a webcam](#publish-a-webcam)
+  * [Publish a Raspberry Pi Camera](#publish-a-raspberry-pi-camera)
+  * [Convert streams to HLS](#convert-streams-to-hls)
+  * [Remuxing, re-encoding, compression](#remuxing-re-encoding-compression)
+  * [On-demand publishing](#on-demand-publishing)
+  * [Redirect to another server](#redirect-to-another-server)
+  * [Fallback stream](#fallback-stream)
+  * [Start on boot with systemd](#start-on-boot-with-systemd)
+  * [Monitoring](#monitoring)
+  * [Command-line usage](#command-line-usage)
+  * [Compile and run from source](#compile-and-run-from-source)
+* [Links](#links)
+
+## Installation
+
+### Standard
 
 1. Download and extract a precompiled binary from the [release page](https://github.com/aler9/rtsp-simple-server/releases).
 
@@ -29,7 +56,23 @@ Features:
    ./rtsp-simple-server
    ```
 
-3. Publish a stream. For instance, you can publish a video/audio file with _FFmpeg_:
+### Docker
+
+Download and launch the image:
+
+```
+docker run --rm -it --network=host aler9/rtsp-simple-server
+```
+
+The `--network=host` flag is mandatory since Docker can change the source port of UDP packets for routing reasons, and this doesn't allow to find out the publisher of the packets. This issue can be avoided by disabling UDP and exposing the RTSP port:
+
+```
+docker run --rm -it -e RTSP_PROTOCOLS=tcp -p 8554:8554 aler9/rtsp-simple-server
+```
+
+## Basic usage
+
+1. Publish a stream. For instance, you can publish a video/audio file with _FFmpeg_:
 
    ```
    ffmpeg -re -stream_loop -1 -i file.ts -c copy -f rtsp rtsp://localhost:8554/mystream
@@ -41,7 +84,7 @@ Features:
    gst-launch-1.0 rtspclientsink name=s location=rtsp://localhost:8554/mystream filesrc location=file.mp4 ! qtdemux name=d d.video_0 ! queue ! s.sink_0 d.audio_0 ! queue ! s.sink_1
    ```
 
-4. Open the stream. For instance, you can open the stream with _VLC_:
+2. Open the stream. For instance, you can open the stream with _VLC_:
 
    ```
    vlc rtsp://localhost:8554/mystream
@@ -61,41 +104,118 @@ Features:
 
 ## Advanced usage and FAQs
 
-### Usage with Docker
-
-Download and launch the image:
-
-```
-docker run --rm -it --network=host aler9/rtsp-simple-server
-```
-
-The `--network=host` argument is mandatory since Docker can change the source port of UDP packets for routing reasons, and this makes RTSP routing impossible. This issue can be avoided by disabling UDP and exposing the RTSP port:
-
-```
-docker run --rm -it -e RTSP_PROTOCOLS=tcp -p 8554:8554 aler9/rtsp-simple-server
-```
-
 ### Configuration
 
-To see or change the configuration, edit the `rtsp-simple-server.yml` file, that is:
+All the configuration parameters are listed and commented in the [configuration file](rtsp-simple-server.yml).
 
-* included the release bundle
-* available in the root folder of the Docker image (`/rtsp-simple-server.yml`)
-* also [available here](rtsp-simple-server.yml).
+There are two ways to change the configuration:
 
-Every configuration parameter can be overridden by environment variables, in the format `RTSP_PARAMNAME`, where `PARAMNAME` is the uppercase name of a parameter. For instance, the `rtspPort` parameter can be overridden in the following way:
+* By editing the `rtsp-simple-server.yml` file, that is
 
-```
-RTSP_RTSPPORT=8555 ./rtsp-simple-server
-```
+  * included into the release bundle
+  * available in the root folder of the Docker image (`/rtsp-simple-server.yml`); it can be overridden in this way:
 
-Parameters in maps can be overridden by using underscores, in the following way:
+    ```
+    docker run --rm -it --network=host -v $PWD/rtsp-simple-server.yml:/rtsp-simple-server.yml aler9/rtsp-simple-server
+    ```
 
-```
-RTSP_PATHS_TEST_SOURCE=rtsp://myurl ./rtsp-simple-server
-```
+* By overriding configuration parameters with environment variables, in the format `RTSP_PARAMNAME`, where `PARAMNAME` is the uppercase name of a parameter. For instance, the `rtspPort` parameter can be overridden in the following way:
+
+   ```
+   RTSP_RTSPPORT=8555 ./rtsp-simple-server
+   ```
+
+   Parameters in maps can be overridden by using underscores, in the following way:
+
+   ```
+   RTSP_PATHS_TEST_SOURCE=rtsp://myurl ./rtsp-simple-server
+   ```
+
+   This method is particularly useful when using Docker; any configuration parameter can be changed by passing environment variables with the `-e` flag:
+
+   ```
+   docker run --rm -it --network=host -e RTSP_PATHS_TEST_SOURCE=rtsp://myurl aler9/rtsp-simple-server
+   ```
 
 The configuration can be changed dinamically when the server is running (hot reloading) by writing to the configuration file. Changes are detected and applied without disconnecting existing clients, whenever it's possible.
+
+### Encryption
+
+Incoming and outgoing streams can be encrypted with TLS (obtaining the RTSPS protocol). A TLS certificate must be installed on the server; if the server is installed on a machine that is publicly accessible from the internet, a certificate can be requested from a Certificate authority by using tools like [Certbot](https://certbot.eff.org/); otherwise, a self-signed certificate can be generated with openSSL:
+
+```
+openssl genrsa -out server.key 2048
+openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650
+```
+
+Edit `rtsp-simple-server.yml`, and set the `protocols`, `encrypt`, `serverKey` and `serverCert` parameters:
+
+```yml
+protocols: [tcp]
+encryption: optional
+serverKey: server.key
+serverCert: server.crt
+```
+
+Streams can then be published and read with the `rtsps` scheme and the `8555` port:
+
+```
+ffmpeg -i rtsps://ip:8555/...
+```
+
+If the client is _GStreamer_ and the server certificate is self signed, remember to disable the certificate validation:
+
+```
+gst-launch-1.0 rtspsrc location=rtsps://ip:8555/... tls-validation-flags=0
+```
+
+If the client is _VLC_, encryption can't be deployed, since _VLC_ doesn't support it.
+
+### Authentication
+
+Edit `rtsp-simple-server.yml` and replace everything inside section `paths` with the following content:
+
+```yml
+paths:
+  all:
+    publishUser: admin
+    publishPass: mypassword
+```
+
+Only publishers that provide both username and password will be able to proceed:
+
+```
+ffmpeg -re -stream_loop -1 -i file.ts -c copy -f rtsp rtsp://admin:mypassword@localhost:8554/mystream
+```
+
+It's possible to setup authentication for readers too:
+
+```yml
+paths:
+  all:
+    publishUser: admin
+    publishPass: mypass
+
+    readUser: user
+    readPass: userpass
+```
+
+If storing plain credentials in the configuration file is a security problem, username and passwords can be stored as sha256-hashed strings; a string must be hashed with sha256 and encoded with base64:
+
+```
+echo -n "userpass" | openssl dgst -binary -sha256 | openssl base64
+```
+
+Then stored with the `sha256:` prefix:
+
+```yml
+paths:
+  all:
+    readUser: sha256:j1tsRqDEw9xvq/D7/9tMx6Jh/jMhk3UfjwIB2f1zgMo=
+    readPass: sha256:BdSWkrdV+ZxFBLUQQY7+7uv9RmiSVA8nrPmjGjJtZQQ=
+```
+
+**WARNING**: enable encryption or use a VPN to ensure that no one is intercepting the credentials.
 
 ### RTSP proxy mode
 
@@ -183,9 +303,9 @@ paths:
 
 After starting the server, the webcam is available on `rtsp://localhost:8554/cam`.
 
-### Generate HLS
+### Convert streams to HLS
 
-Edit `rtsp-simple-server.yml` and replace everything inside section `paths` with the following content:
+HLS is a media format that allows to embed live streams into web pages, inside standard `<video>` HTML tags. To generate HLS whenever someone publishes a stream, edit `rtsp-simple-server.yml` and replace everything inside section `paths` with the following content:
 
 ```yml
 paths:
@@ -194,9 +314,9 @@ paths:
     runOnPublishRestart: yes
 ```
 
-Every time someone publishes a stream, the server will produce HLS segments, that can be served by a web server.
+The resulting files (`stream.m3u8` and a lot of `.ts` segments) can be served by a web server.
 
-The example above makes the assumption that the incoming stream is encoded with H264 and AAC, since they are the only codecs supported by HLS; if the incoming stream is encoded with different codecs, it must be converted:
+The example above makes the assumption that published streams are encoded with H264 and AAC, since they are the only codecs supported by HLS; if streams make use of different codecs, they must be converted:
 
 ```yml
 paths:
@@ -250,37 +370,6 @@ paths:
   withfallback:
     fallback: rtsp://otherurl/otherpath
 ```
-
-### Authentication
-
-Edit `rtsp-simple-server.yml` and replace everything inside section `paths` with the following content:
-
-```yml
-paths:
-  all:
-    publishUser: admin
-    publishPass: mypassword
-```
-
-Only publishers that provide both username and password will be able to proceed:
-
-```
-ffmpeg -re -stream_loop -1 -i file.ts -c copy -f rtsp rtsp://admin:mypassword@localhost:8554/mystream
-```
-
-It's possible to setup authentication for readers too:
-
-```yml
-paths:
-  all:
-    publishUser: admin
-    publishPass: mypassword
-
-    readUser: user
-    readPass: userpassword
-```
-
-WARNING: RTSP is a plain protocol, and the credentials can be intercepted and read by malicious users (even if hashed, since the only supported hash method is md5, which is broken). If you need a secure channel, use RTSP inside a VPN.
 
 ### Start on boot with systemd
 
@@ -361,7 +450,7 @@ There are multiple ways to monitor the server usage over time:
   go tool pprof -text http://localhost:9999/debug/pprof/profile?seconds=30
   ```
 
-### Full command-line usage
+### Command-line usage
 
 ```
 usage: rtsp-simple-server [<flags>]

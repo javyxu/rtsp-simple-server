@@ -15,6 +15,7 @@ import (
 	"github.com/notedit/rtmp/codec/h264"
 	"github.com/notedit/rtmp/format/rtmp"
 
+	"github.com/aler9/rtsp-simple-server/internal/logger"
 	"github.com/aler9/rtsp-simple-server/internal/stats"
 )
 
@@ -25,7 +26,7 @@ const (
 
 // Parent is implemeneted by path.Path.
 type Parent interface {
-	Log(string, ...interface{})
+	Log(logger.Level, string, ...interface{})
 	OnSourceSetReady(gortsplib.Tracks)
 	OnSourceSetNotReady()
 	OnFrame(int, gortsplib.StreamType, []byte)
@@ -56,7 +57,7 @@ func New(ur string,
 	}
 
 	atomic.AddInt64(s.stats.CountSourcesRtmp, +1)
-	s.parent.Log("rtmp source started")
+	s.log(logger.Info, "started")
 
 	s.wg.Add(1)
 	go s.run()
@@ -66,7 +67,7 @@ func New(ur string,
 // Close closes a Source.
 func (s *Source) Close() {
 	atomic.AddInt64(s.stats.CountSourcesRtmpRunning, -1)
-	s.parent.Log("rtmp source stopped")
+	s.log(logger.Info, "stopped")
 	close(s.terminate)
 }
 
@@ -75,6 +76,10 @@ func (s *Source) IsSource() {}
 
 // IsSourceExternal implements path.sourceExternal.
 func (s *Source) IsSourceExternal() {}
+
+func (s *Source) log(level logger.Level, format string, args ...interface{}) {
+	s.parent.Log(level, "[rtmp source] "+format, args...)
+}
 
 func (s *Source) run() {
 	defer s.wg.Done()
@@ -103,7 +108,7 @@ func (s *Source) run() {
 }
 
 func (s *Source) runInner() bool {
-	s.parent.Log("connecting to rtmp source")
+	s.log(logger.Info, "connecting")
 
 	var conn *rtmp.Conn
 	var nconn net.Conn
@@ -121,7 +126,7 @@ func (s *Source) runInner() bool {
 	}
 
 	if err != nil {
-		s.parent.Log("rtmp source ERR: %s", err)
+		s.log(logger.Info, "ERR: %s", err)
 		return true
 	}
 
@@ -179,33 +184,33 @@ func (s *Source) runInner() bool {
 	}
 
 	if err != nil {
-		s.parent.Log("rtmp source ERR: %s", err)
+		s.log(logger.Info, "ERR: %s", err)
 		return true
 	}
 
 	var tracks gortsplib.Tracks
 
 	var videoTrack *gortsplib.Track
-	var videoRtcpSender *rtcpsender.RtcpSender
+	var videoRTCPSender *rtcpsender.RTCPSender
 	var h264Encoder *rtph264.Encoder
 
 	var audioTrack *gortsplib.Track
-	var audioRtcpSender *rtcpsender.RtcpSender
+	var audioRTCPSender *rtcpsender.RTCPSender
 	var aacEncoder *rtpaac.Encoder
 
 	if h264Sps != nil {
 		videoTrack, err = gortsplib.NewTrackH264(96, h264Sps, h264Pps)
 		if err != nil {
-			s.parent.Log("rtmp source ERR: %s", err)
+			s.log(logger.Info, "ERR: %s", err)
 			return true
 		}
 
 		clockRate, _ := videoTrack.ClockRate()
-		videoRtcpSender = rtcpsender.New(clockRate)
+		videoRTCPSender = rtcpsender.New(clockRate)
 
 		h264Encoder, err = rtph264.NewEncoder(96)
 		if err != nil {
-			s.parent.Log("rtmp source ERR: %s", err)
+			s.log(logger.Info, "ERR: %s", err)
 			return true
 		}
 
@@ -215,16 +220,16 @@ func (s *Source) runInner() bool {
 	if aacConfig != nil {
 		audioTrack, err = gortsplib.NewTrackAAC(96, aacConfig)
 		if err != nil {
-			s.parent.Log("rtmp source ERR: %s", err)
+			s.log(logger.Info, "ERR: %s", err)
 			return true
 		}
 
 		clockRate, _ := audioTrack.ClockRate()
-		audioRtcpSender = rtcpsender.New(clockRate)
+		audioRTCPSender = rtcpsender.New(clockRate)
 
 		aacEncoder, err = rtpaac.NewEncoder(96, clockRate)
 		if err != nil {
-			s.parent.Log("rtmp source ERR: %s", err)
+			s.log(logger.Info, "ERR: %s", err)
 			return true
 		}
 
@@ -232,7 +237,7 @@ func (s *Source) runInner() bool {
 	}
 
 	if len(tracks) == 0 {
-		s.parent.Log("rtmp source ERR: no tracks found")
+		s.log(logger.Info, "ERR: no tracks found")
 		return true
 	}
 
@@ -240,7 +245,7 @@ func (s *Source) runInner() bool {
 		t.ID = i
 	}
 
-	s.parent.Log("rtmp source ready")
+	s.log(logger.Info, "ready")
 	s.parent.OnSourceSetReady(tracks)
 	defer s.parent.OnSourceSetNotReady()
 
@@ -257,17 +262,17 @@ func (s *Source) runInner() bool {
 			case <-t.C:
 				now := time.Now()
 
-				if videoRtcpSender != nil {
-					r := videoRtcpSender.Report(now)
+				if videoRTCPSender != nil {
+					r := videoRTCPSender.Report(now)
 					if r != nil {
-						s.parent.OnFrame(videoTrack.ID, gortsplib.StreamTypeRtcp, r)
+						s.parent.OnFrame(videoTrack.ID, gortsplib.StreamTypeRTCP, r)
 					}
 				}
 
-				if audioRtcpSender != nil {
-					r := audioRtcpSender.Report(now)
+				if audioRTCPSender != nil {
+					r := audioRTCPSender.Report(now)
 					if r != nil {
-						s.parent.OnFrame(audioTrack.ID, gortsplib.StreamTypeRtcp, r)
+						s.parent.OnFrame(audioTrack.ID, gortsplib.StreamTypeRTCP, r)
 					}
 				}
 
@@ -308,8 +313,8 @@ func (s *Source) runInner() bool {
 				}
 
 				for _, f := range frames {
-					videoRtcpSender.ProcessFrame(time.Now(), gortsplib.StreamTypeRtp, f)
-					s.parent.OnFrame(videoTrack.ID, gortsplib.StreamTypeRtp, f)
+					videoRTCPSender.ProcessFrame(time.Now(), gortsplib.StreamTypeRTP, f)
+					s.parent.OnFrame(videoTrack.ID, gortsplib.StreamTypeRTP, f)
 				}
 
 			case av.AAC:
@@ -325,8 +330,8 @@ func (s *Source) runInner() bool {
 				}
 
 				for _, f := range frames {
-					audioRtcpSender.ProcessFrame(time.Now(), gortsplib.StreamTypeRtp, f)
-					s.parent.OnFrame(audioTrack.ID, gortsplib.StreamTypeRtp, f)
+					audioRTCPSender.ProcessFrame(time.Now(), gortsplib.StreamTypeRTP, f)
+					s.parent.OnFrame(audioTrack.ID, gortsplib.StreamTypeRTP, f)
 				}
 
 			default:
@@ -348,7 +353,7 @@ func (s *Source) runInner() bool {
 
 		case err := <-readerDone:
 			nconn.Close()
-			s.parent.Log("rtmp source ERR: %s", err)
+			s.log(logger.Info, "ERR: %s", err)
 
 			close(rtcpTerminate)
 			<-rtcpDone

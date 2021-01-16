@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"reflect"
 	"sync/atomic"
@@ -13,12 +12,13 @@ import (
 	"github.com/aler9/rtsp-simple-server/internal/clientman"
 	"github.com/aler9/rtsp-simple-server/internal/conf"
 	"github.com/aler9/rtsp-simple-server/internal/confwatcher"
-	"github.com/aler9/rtsp-simple-server/internal/loghandler"
+	"github.com/aler9/rtsp-simple-server/internal/logger"
 	"github.com/aler9/rtsp-simple-server/internal/metrics"
 	"github.com/aler9/rtsp-simple-server/internal/pathman"
 	"github.com/aler9/rtsp-simple-server/internal/pprof"
-	"github.com/aler9/rtsp-simple-server/internal/servertcp"
-	"github.com/aler9/rtsp-simple-server/internal/serverudp"
+	"github.com/aler9/rtsp-simple-server/internal/serverplain"
+	"github.com/aler9/rtsp-simple-server/internal/servertls"
+	"github.com/aler9/rtsp-simple-server/internal/serverudpl"
 	"github.com/aler9/rtsp-simple-server/internal/stats"
 )
 
@@ -29,12 +29,13 @@ type program struct {
 	conf          *conf.Conf
 	confFound     bool
 	stats         *stats.Stats
-	logHandler    *loghandler.LogHandler
+	logger        *logger.Logger
 	metrics       *metrics.Metrics
 	pprof         *pprof.Pprof
-	serverUDPRtp  *serverudp.Server
-	serverUDPRtcp *serverudp.Server
-	serverTCP     *servertcp.Server
+	serverUDPRTP  *gortsplib.ServerUDPListener
+	serverUDPRTCP *gortsplib.ServerUDPListener
+	serverPlain   *serverplain.Server
+	serverTLS     *servertls.Server
 	pathMan       *pathman.PathManager
 	clientMan     *clientman.ClientManager
 	confWatcher   *confwatcher.ConfWatcher
@@ -43,7 +44,7 @@ type program struct {
 	done      chan struct{}
 }
 
-func newProgram(args []string) (*program, error) {
+func newProgram(args []string) (*program, bool) {
 	k := kingpin.New("rtsp-simple-server",
 		"rtsp-simple-server "+version+"\n\nRTSP server.")
 
@@ -66,26 +67,29 @@ func newProgram(args []string) (*program, error) {
 	var err error
 	p.conf, p.confFound, err = conf.Load(p.confPath)
 	if err != nil {
-		return nil, err
+		fmt.Printf("ERR: %s\n", err)
+		return nil, false
 	}
 
-	err = p.createDynamicResources(true)
+	err = p.createResources(true)
 	if err != nil {
-		p.closeAllResources()
-		return nil, err
+		p.Log(logger.Info, "ERR: %s", err)
+		p.closeResources(nil)
+		return nil, false
 	}
 
 	if p.confFound {
 		p.confWatcher, err = confwatcher.New(p.confPath)
 		if err != nil {
-			p.closeAllResources()
-			return nil, err
+			p.Log(logger.Info, "ERR: %s", err)
+			p.closeResources(nil)
+			return nil, false
 		}
 	}
 
 	go p.run()
 
-	return p, nil
+	return p, true
 }
 
 func (p *program) close() {
@@ -93,12 +97,12 @@ func (p *program) close() {
 	<-p.done
 }
 
-func (p *program) Log(format string, args ...interface{}) {
+func (p *program) Log(level logger.Level, format string, args ...interface{}) {
 	countClients := atomic.LoadInt64(p.stats.CountClients)
 	countPublishers := atomic.LoadInt64(p.stats.CountPublishers)
 	countReaders := atomic.LoadInt64(p.stats.CountReaders)
 
-	log.Printf("[%d/%d/%d] "+format, append([]interface{}{countClients,
+	p.logger.Log(level, "[%d/%d/%d] "+format, append([]interface{}{countClients,
 		countPublishers, countReaders}, args...)...)
 }
 
@@ -118,7 +122,7 @@ outer:
 		case <-confChanged:
 			err := p.reloadConf()
 			if err != nil {
-				p.Log("ERR: %s", err)
+				p.Log(logger.Info, "ERR: %s", err)
 				break outer
 			}
 
@@ -127,34 +131,43 @@ outer:
 		}
 	}
 
-	p.closeAllResources()
+	p.closeResources(nil)
+
+	if p.confWatcher != nil {
+		p.confWatcher.Close()
+	}
 }
 
-func (p *program) createDynamicResources(initial bool) error {
+func (p *program) createResources(initial bool) error {
 	var err error
 
 	if p.stats == nil {
 		p.stats = stats.New()
 	}
 
-	if p.logHandler == nil {
-		p.logHandler, err = loghandler.New(p.conf.LogDestinationsParsed, p.conf.LogFile)
+	if p.logger == nil {
+		p.logger, err = logger.New(
+			p.conf.LogLevelParsed,
+			p.conf.LogDestinationsParsed,
+			p.conf.LogFile)
 		if err != nil {
 			return err
 		}
 	}
 
 	if initial {
-		p.Log("rtsp-simple-server %s", version)
-
+		p.Log(logger.Info, "rtsp-simple-server %s", version)
 		if !p.confFound {
-			p.Log("configuration file not found, using the default one")
+			p.Log(logger.Warn, "configuration file not found, using the default one")
 		}
 	}
 
 	if p.conf.Metrics {
 		if p.metrics == nil {
-			p.metrics, err = metrics.New(p.stats, p)
+			p.metrics, err = metrics.New(
+				p.conf.ListenIP,
+				p.stats,
+				p)
 			if err != nil {
 				return err
 			}
@@ -163,7 +176,11 @@ func (p *program) createDynamicResources(initial bool) error {
 
 	if p.conf.Pprof {
 		if p.pprof == nil {
-			p.pprof, err = pprof.New(p.confPath, p.conf, p)
+			p.pprof, err = pprof.New(
+				p.conf.ListenIP,
+				p.confPath,
+				p.conf,
+				p)
 			if err != nil {
 				return err
 			}
@@ -171,176 +188,214 @@ func (p *program) createDynamicResources(initial bool) error {
 	}
 
 	if _, ok := p.conf.ProtocolsParsed[gortsplib.StreamProtocolUDP]; ok {
-		if p.serverUDPRtp == nil {
-			p.serverUDPRtp, err = serverudp.New(p.conf.WriteTimeout,
-				p.conf.RtpPort, gortsplib.StreamTypeRtp, p)
+		if p.serverUDPRTP == nil {
+			p.serverUDPRTP, err = serverudpl.New(
+				p.conf.ListenIP,
+				p.conf.RTPPort,
+				gortsplib.StreamTypeRTP,
+				p)
 			if err != nil {
 				return err
 			}
 		}
 
-		if p.serverUDPRtcp == nil {
-			p.serverUDPRtcp, err = serverudp.New(p.conf.WriteTimeout,
-				p.conf.RtcpPort, gortsplib.StreamTypeRtcp, p)
+		if p.serverUDPRTCP == nil {
+			p.serverUDPRTCP, err = serverudpl.New(
+				p.conf.ListenIP,
+				p.conf.RTCPPort,
+				gortsplib.StreamTypeRTCP,
+				p)
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	if p.serverTCP == nil {
-		p.serverTCP, err = servertcp.New(p.conf.RtspPort, p.conf.ReadTimeout,
-			p.conf.WriteTimeout, p)
-		if err != nil {
-			return err
+	if p.serverPlain == nil {
+		if p.conf.EncryptionParsed == conf.EncryptionNo || p.conf.EncryptionParsed == conf.EncryptionOptional {
+			p.serverPlain, err = serverplain.New(
+				p.conf.ListenIP,
+				p.conf.RtspPort,
+				p.conf.ReadTimeout,
+				p.conf.WriteTimeout,
+				p.conf.ReadBufferCount,
+				p.serverUDPRTP,
+				p.serverUDPRTCP,
+				p)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if p.serverTLS == nil {
+		if p.conf.EncryptionParsed == conf.EncryptionStrict || p.conf.EncryptionParsed == conf.EncryptionOptional {
+			p.serverTLS, err = servertls.New(
+				p.conf.ListenIP,
+				p.conf.RtspsPort,
+				p.conf.ReadTimeout,
+				p.conf.WriteTimeout,
+				p.conf.ReadBufferCount,
+				p.conf.ServerKey,
+				p.conf.ServerCert,
+				p)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	if p.pathMan == nil {
-		p.pathMan = pathman.New(p.conf.RtspPort, p.conf.ReadTimeout,
-			p.conf.WriteTimeout, p.conf.AuthMethodsParsed, p.conf.Paths,
-			p.stats, p)
+		p.pathMan = pathman.New(
+			p.conf.RtspPort,
+			p.conf.ReadTimeout,
+			p.conf.WriteTimeout,
+			p.conf.ReadBufferCount,
+			p.conf.AuthMethodsParsed,
+			p.conf.Paths,
+			p.stats,
+			p)
 	}
 
 	if p.clientMan == nil {
-		p.clientMan = clientman.New(p.conf.RtspPort, p.conf.ReadTimeout,
-			p.conf.RunOnConnect, p.conf.RunOnConnectRestart,
-			p.conf.ProtocolsParsed, p.stats, p.serverUDPRtp, p.serverUDPRtcp,
-			p.pathMan, p.serverTCP, p)
+		p.clientMan = clientman.New(
+			p.conf.RtspPort,
+			p.conf.ReadTimeout,
+			p.conf.RunOnConnect,
+			p.conf.RunOnConnectRestart,
+			p.conf.ProtocolsParsed,
+			p.stats,
+			p.pathMan,
+			p.serverPlain,
+			p.serverTLS,
+			p)
 	}
 
 	return nil
 }
 
-func (p *program) closeAllResources() {
-	if p.confWatcher != nil {
-		p.confWatcher.Close()
-	}
-
-	if p.clientMan != nil {
-		p.clientMan.Close()
-	}
-
-	if p.pathMan != nil {
-		p.pathMan.Close()
-	}
-
-	if p.serverTCP != nil {
-		p.serverTCP.Close()
-	}
-
-	if p.serverUDPRtcp != nil {
-		p.serverUDPRtcp.Close()
-	}
-
-	if p.serverUDPRtp != nil {
-		p.serverUDPRtp.Close()
-	}
-
-	if p.metrics != nil {
-		p.metrics.Close()
-	}
-
-	if p.pprof != nil {
-		p.pprof.Close()
-	}
-
-	if p.logHandler != nil {
-		p.logHandler.Close()
-	}
-}
-
-func (p *program) reloadConf() error {
-	p.Log("reloading configuration")
-
-	conf, _, err := conf.Load(p.confPath)
-	if err != nil {
-		return err
-	}
-
-	closeLogHandler := false
-	if !reflect.DeepEqual(conf.LogDestinationsParsed, p.conf.LogDestinationsParsed) ||
-		conf.LogFile != p.conf.LogFile {
-		closeLogHandler = true
+func (p *program) closeResources(newConf *conf.Conf) {
+	closeLogger := false
+	if newConf == nil ||
+		!reflect.DeepEqual(newConf.LogDestinationsParsed, p.conf.LogDestinationsParsed) ||
+		newConf.LogFile != p.conf.LogFile {
+		closeLogger = true
 	}
 
 	closeMetrics := false
-	if conf.Metrics != p.conf.Metrics {
+	if newConf == nil ||
+		newConf.Metrics != p.conf.Metrics ||
+		newConf.ListenIP != p.conf.ListenIP {
 		closeMetrics = true
 	}
 
 	closePprof := false
-	if conf.Pprof != p.conf.Pprof {
+	if newConf == nil ||
+		newConf.Pprof != p.conf.Pprof ||
+		newConf.ListenIP != p.conf.ListenIP {
 		closePprof = true
 	}
 
-	closeServerUDPRtp := false
-	if !reflect.DeepEqual(conf.ProtocolsParsed, p.conf.ProtocolsParsed) ||
-		conf.WriteTimeout != p.conf.WriteTimeout ||
-		conf.RtpPort != p.conf.RtpPort {
-		closeServerUDPRtp = true
+	closeServerUDPRTP := false
+	if newConf == nil ||
+		!reflect.DeepEqual(newConf.ProtocolsParsed, p.conf.ProtocolsParsed) ||
+		newConf.ListenIP != p.conf.ListenIP ||
+		newConf.RTPPort != p.conf.RTPPort ||
+		newConf.WriteTimeout != p.conf.WriteTimeout {
+		closeServerUDPRTP = true
 	}
 
-	closeServerUDPRtcp := false
-	if !reflect.DeepEqual(conf.ProtocolsParsed, p.conf.ProtocolsParsed) ||
-		conf.WriteTimeout != p.conf.WriteTimeout ||
-		conf.RtcpPort != p.conf.RtcpPort {
-		closeServerUDPRtcp = true
+	closeServerUDPRTCP := false
+	if newConf == nil ||
+		!reflect.DeepEqual(newConf.ProtocolsParsed, p.conf.ProtocolsParsed) ||
+		newConf.ListenIP != p.conf.ListenIP ||
+		newConf.RTCPPort != p.conf.RTCPPort ||
+		newConf.WriteTimeout != p.conf.WriteTimeout {
+		closeServerUDPRTCP = true
 	}
 
-	closeServerTCP := false
-	if conf.RtspPort != p.conf.RtspPort ||
-		conf.ReadTimeout != p.conf.ReadTimeout ||
-		conf.WriteTimeout != p.conf.WriteTimeout {
-		closeServerTCP = true
+	closeServerPlain := false
+	if newConf == nil ||
+		newConf.EncryptionParsed != p.conf.EncryptionParsed ||
+		newConf.ListenIP != p.conf.ListenIP ||
+		newConf.RtspPort != p.conf.RtspPort ||
+		newConf.ReadTimeout != p.conf.ReadTimeout ||
+		newConf.WriteTimeout != p.conf.WriteTimeout ||
+		newConf.ReadBufferCount != p.conf.ReadBufferCount ||
+		closeServerUDPRTP ||
+		closeServerUDPRTCP {
+		closeServerPlain = true
+	}
+
+	closeServerTLS := false
+	if newConf == nil ||
+		newConf.EncryptionParsed != p.conf.EncryptionParsed ||
+		newConf.ListenIP != p.conf.ListenIP ||
+		newConf.RtspsPort != p.conf.RtspsPort ||
+		newConf.ReadTimeout != p.conf.ReadTimeout ||
+		newConf.WriteTimeout != p.conf.WriteTimeout ||
+		newConf.ReadBufferCount != p.conf.ReadBufferCount {
+		closeServerTLS = true
 	}
 
 	closePathMan := false
-	if conf.RtspPort != p.conf.RtspPort ||
-		conf.ReadTimeout != p.conf.ReadTimeout ||
-		conf.WriteTimeout != p.conf.WriteTimeout ||
-		!reflect.DeepEqual(conf.AuthMethodsParsed, p.conf.AuthMethodsParsed) {
+	if newConf == nil ||
+		newConf.RtspPort != p.conf.RtspPort ||
+		newConf.ReadTimeout != p.conf.ReadTimeout ||
+		newConf.WriteTimeout != p.conf.WriteTimeout ||
+		newConf.ReadBufferCount != p.conf.ReadBufferCount ||
+		!reflect.DeepEqual(newConf.AuthMethodsParsed, p.conf.AuthMethodsParsed) {
 		closePathMan = true
-	} else if !reflect.DeepEqual(conf.Paths, p.conf.Paths) {
-		p.pathMan.OnProgramConfReload(conf.Paths)
+	} else if !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
+		p.pathMan.OnProgramConfReload(newConf.Paths)
 	}
 
 	closeClientMan := false
-	if closeServerUDPRtp ||
-		closeServerUDPRtcp ||
-		closeServerTCP ||
+	if newConf == nil ||
+		closeServerPlain ||
+		closeServerTLS ||
 		closePathMan ||
-		conf.RtspPort != p.conf.RtspPort ||
-		conf.ReadTimeout != p.conf.ReadTimeout ||
-		conf.RunOnConnect != p.conf.RunOnConnect ||
-		conf.RunOnConnectRestart != p.conf.RunOnConnectRestart ||
-		!reflect.DeepEqual(conf.ProtocolsParsed, p.conf.ProtocolsParsed) {
+		newConf.RtspPort != p.conf.RtspPort ||
+		newConf.ReadTimeout != p.conf.ReadTimeout ||
+		newConf.RunOnConnect != p.conf.RunOnConnect ||
+		newConf.RunOnConnectRestart != p.conf.RunOnConnectRestart ||
+		!reflect.DeepEqual(newConf.ProtocolsParsed, p.conf.ProtocolsParsed) {
 		closeClientMan = true
 	}
 
-	if closeClientMan {
+	closeStats := false
+	if newConf == nil {
+		closeStats = true
+	}
+
+	if closeClientMan && p.clientMan != nil {
 		p.clientMan.Close()
 		p.clientMan = nil
 	}
 
-	if closePathMan {
+	if closePathMan && p.pathMan != nil {
 		p.pathMan.Close()
 		p.pathMan = nil
 	}
 
-	if closeServerTCP {
-		p.serverTCP.Close()
-		p.serverTCP = nil
+	if closeServerTLS && p.serverTLS != nil {
+		p.serverTLS.Close()
+		p.serverTLS = nil
 	}
 
-	if closeServerUDPRtcp && p.serverUDPRtcp != nil {
-		p.serverUDPRtcp.Close()
-		p.serverUDPRtcp = nil
+	if closeServerPlain && p.serverPlain != nil {
+		p.serverPlain.Close()
+		p.serverPlain = nil
 	}
 
-	if closeServerUDPRtp && p.serverUDPRtp != nil {
-		p.serverUDPRtp.Close()
-		p.serverUDPRtp = nil
+	if closeServerUDPRTCP && p.serverUDPRTCP != nil {
+		p.serverUDPRTCP.Close()
+		p.serverUDPRTCP = nil
+	}
+
+	if closeServerUDPRTP && p.serverUDPRTP != nil {
+		p.serverUDPRTP.Close()
+		p.serverUDPRTP = nil
 	}
 
 	if closePprof && p.pprof != nil {
@@ -353,20 +408,34 @@ func (p *program) reloadConf() error {
 		p.metrics = nil
 	}
 
-	if closeLogHandler {
-		p.logHandler.Close()
-		p.logHandler = nil
+	if closeLogger && p.logger != nil {
+		p.logger.Close()
+		p.logger = nil
 	}
 
-	p.conf = conf
-	return p.createDynamicResources(false)
+	if closeStats && p.stats != nil {
+		p.stats.Close()
+	}
+}
+
+func (p *program) reloadConf() error {
+	p.Log(logger.Info, "reloading configuration")
+
+	newConf, _, err := conf.Load(p.confPath)
+	if err != nil {
+		return err
+	}
+
+	p.closeResources(newConf)
+
+	p.conf = newConf
+	return p.createResources(false)
 }
 
 func main() {
-	p, err := newProgram(os.Args[1:])
-	if err != nil {
-		log.Fatal("ERR: ", err)
+	p, ok := newProgram(os.Args[1:])
+	if !ok {
+		os.Exit(1)
 	}
-
 	<-p.done
 }
